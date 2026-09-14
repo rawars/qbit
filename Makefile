@@ -2,6 +2,7 @@ REDIS_ADDR ?= 127.0.0.1:6379
 QBIT_QUEUE ?= default
 FUZZ_TIME ?= 10s
 COVERAGE_MIN ?= 70
+COVERAGE_PKGS ?= ./packages/go/...
 QBIT_METRICS_IMAGE ?= qbit-metrics:dev
 VERSION ?= dev
 COMMIT ?= working-tree
@@ -27,7 +28,7 @@ fuzz:
 	go test ./packages/go/qbit -run '^$$' -fuzz '^FuzzIdentifiers$$' -fuzztime=$(FUZZ_TIME)
 
 coverage:
-	QBIT_REDIS_ADDR=$(REDIS_ADDR) go test -race -covermode=atomic -coverprofile=coverage.out ./...
+	QBIT_REDIS_ADDR=$(REDIS_ADDR) go test -race -count=1 -covermode=atomic -coverprofile=coverage.out $(COVERAGE_PKGS)
 	go tool cover -func=coverage.out
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $$3); print $$3}'); \
 	awk -v total="$$total" -v minimum="$(COVERAGE_MIN)" 'BEGIN { if (total + 0 < minimum + 0) { printf "coverage %.1f%% is below %.1f%%\n", total, minimum; exit 1 } }'

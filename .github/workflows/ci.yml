@@ -29,7 +29,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Tests and coverage
-        run: make coverage
+        run: make integration coverage
       - name: Staticcheck
         run: make staticcheck
       - name: Vulnerability scan

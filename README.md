@@ -127,14 +127,17 @@ With Redis running locally, the same checks used by CI can be executed with:
 ```bash
 make integration   # Redis integration tests with the race detector
 make audit         # staticcheck, govulncheck and go vet
-make coverage      # atomic coverage profile and minimum threshold
+make coverage      # SDK coverage profile and minimum threshold
 make fuzz          # coverage-guided native Go fuzzing
 make benchmark     # enqueue and grouped-lifecycle throughput
 make chaos         # worker crashes, lock recovery and connection drops
 ```
 
 `REDIS_ADDR` selects Redis and defaults to `127.0.0.1:6379`. `FUZZ_TIME` and
-`COVERAGE_MIN` control fuzz duration and the required coverage percentage.
+`COVERAGE_MIN` control fuzz duration and the required SDK coverage percentage.
+CI runs `make integration` across the complete repository before calculating
+coverage for the installable packages under `packages/go`. This keeps demos and
+binary entry points from diluting the library quality signal.
 
 ## Observability
 
