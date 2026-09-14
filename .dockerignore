@@ -1,0 +1,5 @@
+.git
+.github
+.playwright-cli
+benchmark.txt
+coverage.out

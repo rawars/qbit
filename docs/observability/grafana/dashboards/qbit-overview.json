@@ -1,0 +1,239 @@
+{
+  "annotations": { "list": [] },
+  "description": "Operational view of Qbit throughput, backlog, worker capacity, failures, retries and recovery.",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "cyan" }, "decimals": 2, "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Jobs accepted by the selected queue per second.",
+      "targets": [{ "expr": "sum(rate(qbit_jobs_published_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Published/s", "refId": "A" }],
+      "title": "Published/s",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" }, "decimals": 2, "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Jobs successfully completed per second.",
+      "targets": [{ "expr": "sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Completed/s", "refId": "A" }],
+      "title": "Completed/s",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Jobs waiting to be reserved. Use backlog growth below to determine whether this is unhealthy.",
+      "targets": [{ "expr": "sum(qbit_jobs_waiting{queue=~\"$queue\"})", "legendFormat": "Waiting", "refId": "A" }],
+      "title": "Backlog",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] }, "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Processing attempts that failed per second, including transient failures that are retried.",
+      "targets": [{ "expr": "sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Failed/s", "refId": "A" }],
+      "title": "Failed/s",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "description": "Percentage of configured worker slots currently processing a job. Sustained values above 90% indicate worker saturation.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 1, "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }] }, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
+      "id": 12,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "100 * sum(qbit_jobs_active{queue=~\"$queue\"}) / clamp_min(sum(qbit_worker_concurrency_slots{queue=~\"$queue\"}), 1)", "instant": true, "legendFormat": "Utilization", "range": false, "refId": "A" }],
+      "title": "Worker utilization",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "description": "Net backlog movement. Positive values mean the queue is accumulating work; negative values mean it is draining.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 100 }] }, "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 5 },
+      "id": 13,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "sum(rate(qbit_jobs_published_total{queue=~\"$queue\"}[5m])) + sum(rate(qbit_jobs_retried_total{queue=~\"$queue\"}[5m])) - sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[5m])) - sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[5m]))", "legendFormat": "Backlog delta/s", "refId": "A" }],
+      "title": "Backlog change/s",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "description": "Successful processing attempts as a percentage of all completed attempts during the last five minutes.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 1, "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 95 }, { "color": "green", "value": 99 }] }, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
+      "id": 14,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "100 * (sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[5m])) + ((sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[5m])) + sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[5m]))) == bool 0)) / clamp_min(sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[5m])) + sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[5m])), 1)", "legendFormat": "Success", "refId": "A" }],
+      "title": "Attempt success",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "description": "Retried jobs that later completed successfully. No retry activity is treated as healthy.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 1, "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 90 }, { "color": "green", "value": 99 }] }, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 5 },
+      "id": 15,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "100 * (sum(rate(qbit_jobs_recovered_total{queue=~\"$queue\"}[5m])) + (sum(rate(qbit_jobs_retried_total{queue=~\"$queue\"}[5m])) == bool 0)) / clamp_min(sum(rate(qbit_jobs_retried_total{queue=~\"$queue\"}[5m])), 1)", "legendFormat": "Recovery", "refId": "A" }],
+      "title": "Retry recovery",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": true, "drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true }, "unit": "ops" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Published/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "cyan", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Completed/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Failed/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Recovered/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "semi-dark-green", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 9 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "expr": "sum(rate(qbit_jobs_published_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Published/s", "refId": "A" },
+        { "expr": "sum(rate(qbit_jobs_completed_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Completed/s", "refId": "B" },
+        { "expr": "sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Failed/s", "refId": "C" },
+        { "expr": "sum(rate(qbit_jobs_recovered_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Recovered/s", "refId": "D" }
+      ],
+      "title": "Queue flow",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 9 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "expr": "avg(qbit_queue_wait_seconds{queue=~\"$queue\"})", "legendFormat": "Queue wait", "refId": "A" },
+        { "expr": "avg(qbit_processing_duration_seconds{queue=~\"$queue\"})", "legendFormat": "Processing", "refId": "B" }
+      ],
+      "title": "Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "id": 7,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "expr": "sum(qbit_jobs_active{queue=~\"$queue\"})", "legendFormat": "Active jobs", "refId": "A" },
+        { "expr": "sum(qbit_ready_groups{queue=~\"$queue\"})", "legendFormat": "Ready groups", "refId": "B" },
+        { "expr": "sum(qbit_jobs_waiting{queue=~\"$queue\"})", "legendFormat": "Waiting jobs", "refId": "C" }
+      ],
+      "title": "Concurrency and groups",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Failed attempts/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Retried/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Recovered/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Recovered stalls/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "id": 8,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "expr": "sum(rate(qbit_jobs_failed_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Failed attempts/s", "refId": "A" },
+        { "expr": "sum(rate(qbit_jobs_retried_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Retried/s", "refId": "B" },
+        { "expr": "sum(rate(qbit_jobs_recovered_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Recovered/s", "refId": "C" },
+        { "expr": "sum(rate(qbit_jobs_stalled_total{queue=~\"$queue\"}[$__rate_interval]))", "legendFormat": "Recovered stalls/s", "refId": "D" }
+      ],
+      "title": "Failures and recovery",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" }, "decimals": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "id": 9,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Worker processes or pods currently reporting a live heartbeat.",
+      "targets": [{ "expr": "sum(qbit_worker_replicas_active{queue=~\"$queue\"})", "instant": true, "legendFormat": "Worker replicas", "range": false, "refId": "A" }],
+      "title": "Worker replicas",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" }, "decimals": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "id": 10,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "description": "Total configured parallel processing slots across live worker replicas.",
+      "targets": [{ "expr": "sum(qbit_worker_concurrency_slots{queue=~\"$queue\"})", "instant": true, "legendFormat": "Worker slots", "range": false, "refId": "A" }],
+      "title": "Worker slots",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "id": 11,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true },
+      "targets": [{ "expr": "qbit_worker_concurrency{queue=~\"$queue\"}", "format": "table", "instant": true, "legendFormat": "{{worker_instance}}", "range": false, "refId": "A" }],
+      "title": "Live worker instances",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true },
+            "indexByName": { "worker_instance": 0, "queue": 1, "Value": 2, "worker_id": 3 },
+            "renameByName": { "worker_instance": "Instance", "queue": "Queue", "Value": "Concurrency", "worker_id": "Worker ID" }
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["qbit", "redis", "queues"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "qbit-prometheus" },
+        "definition": "label_values(qbit_jobs_published_total, queue)",
+        "includeAll": true,
+        "label": "Queue",
+        "multi": true,
+        "name": "queue",
+        "options": [],
+        "query": { "query": "label_values(qbit_jobs_published_total, queue)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30m", "to": "now" },
+  "timezone": "browser",
+  "title": "Qbit Queue Overview",
+  "uid": "qbit-queue-overview",
+  "version": 7
+}

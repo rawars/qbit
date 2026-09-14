@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-go:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 10
+    env:
+      QBIT_REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Tests and coverage
+        run: make coverage
+      - name: Staticcheck
+        run: make staticcheck
+      - name: Vulnerability scan
+        run: make govulncheck
+      - name: Fuzz identifiers
+        run: FUZZ_TIME=10s make fuzz
+      - name: Chaos tests
+        run: make chaos
+      - name: Benchmarks
+        run: make benchmark | tee benchmark.txt
+      - name: Upload quality artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-quality-results
+          path: |
+            coverage.out
+            benchmark.txt

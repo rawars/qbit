@@ -1,0 +1,53 @@
+services:
+  qbit-metrics:
+    image: ${QBIT_METRICS_IMAGE:-qbit-metrics:dev}
+    build:
+      context: ../..
+      dockerfile: cmd/qbit-metrics/Dockerfile
+    environment:
+      QBIT_METRICS_ADDR: 0.0.0.0:9091
+      QBIT_REDIS_ADDR: ${QBIT_REDIS_ADDR:-host.docker.internal:6379}
+      QBIT_REDIS_USERNAME: ${QBIT_REDIS_USERNAME:-}
+      QBIT_REDIS_PASSWORD: ${QBIT_REDIS_PASSWORD:-}
+      QBIT_REDIS_DB: ${QBIT_REDIS_DB:-0}
+      QBIT_REDIS_MASTER_NAME: ${QBIT_REDIS_MASTER_NAME:-}
+      QBIT_QUEUES: ${QBIT_QUEUES:-}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:latest}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - ${PROMETHEUS_PORT:-9090}:9090
+    depends_on:
+      - qbit-metrics
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:latest}
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-qbit}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - ${GRAFANA_PORT:-3000}:3000
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

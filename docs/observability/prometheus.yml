@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: qbit
+    static_configs:
+      - targets:
+          - qbit-metrics:9091
