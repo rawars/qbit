@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,141 @@ import (
 	qbit "github.com/rawars/qbit/packages/go"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestSimulationFailureKeepsTheOriginalError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sim := &simulation{ctx: ctx, cancel: cancel}
+	original := errors.New("redis: OOM command not allowed when used memory > 'maxmemory'")
+	sim.fail(original)
+	sim.fail(errors.New("context canceled"))
+
+	sim.stateMu.RLock()
+	message := sim.errorMessage
+	sim.stateMu.RUnlock()
+	if message != original.Error() {
+		t.Fatalf("failure = %q, want original Redis error %q", message, original.Error())
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("failure should cancel the simulation")
+	}
+}
+
+func TestPublishFailureIsExposedBeforeCancellation(t *testing.T) {
+	client, err := qbit.NewClient(qbit.ClientOptions{Redis: qbit.RedisOptions{Address: "127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := client.Queue("fazpi-publisher-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	config := defaultConfig("127.0.0.1:1")
+	config.TrafficProfiles = []TrafficProfile{{Account: "Casur", Agent: "Kata", PeoplePerHour: 1, MessagesPerPerson: 1}}
+	config.ArrivalWeights = []float64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	config.TestDurationSeconds = 1
+	config.PublisherConcurrency = 1
+	sim := &simulation{
+		config:         config,
+		runID:          "publisher-error",
+		publisherQueue: queue,
+		ctx:            ctx,
+		cancel:         cancel,
+		profileCounts:  make([]profileCounters, 1),
+	}
+
+	publishErr := sim.publishAll()
+	if publishErr == nil {
+		t.Fatal("expected publication to fail with the closed Redis client")
+	}
+	sim.stateMu.RLock()
+	message := sim.errorMessage
+	sim.stateMu.RUnlock()
+	if message != publishErr.Error() || !strings.Contains(message, "closed") {
+		t.Fatalf("visible error = %q, publication error = %q", message, publishErr)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("simulation context error = %v, want canceled", ctx.Err())
+	}
+}
+
+func TestRedisScanLiteralKeepsCleanupOnOneQueue(t *testing.T) {
+	got := redisScanLiteral(`fazpi*[test]?\\queue`)
+	want := `fazpi\*\[test\]\?\\\\queue`
+	if got != want {
+		t.Fatalf("escaped queue = %q, want %q", got, want)
+	}
+}
+
+func TestCleanupOnlyAcceptsLoopbackRedis(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:6379", "localhost:6379", "[::1]:6379", "host.docker.internal:6379"} {
+		if !isLoopbackRedisAddress(address) {
+			t.Fatalf("expected %q to be accepted", address)
+		}
+	}
+	for _, address := range []string{"redis.internal:6379", "10.0.0.8:6379", "127.0.0.1"} {
+		if isLoopbackRedisAddress(address) {
+			t.Fatalf("expected %q to be rejected", address)
+		}
+	}
+}
+
+func TestPurgeQueueDataOnlyDeletesRequestedQueue(t *testing.T) {
+	address := os.Getenv("QBIT_REDIS_ADDR")
+	if address == "" {
+		t.Skip("set QBIT_REDIS_ADDR to run the Redis cleanup test")
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	target := "fazpi-cleanup-target-" + suffix
+	neighbor := "fazpi-cleanup-neighbor-" + suffix
+	targetKey := "qbit:{" + target + "}:job:1"
+	neighborKey := "qbit:{" + neighbor + "}:job:1"
+	client := redis.NewClient(&redis.Options{Addr: address})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = client.Unlink(cleanupCtx, targetKey, neighborKey).Err()
+		_ = client.SRem(cleanupCtx, "qbit:registry:{queues}:names", target, neighbor).Err()
+		_ = client.Close()
+	})
+	if err := client.Set(ctx, targetKey, "target", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, neighborKey, "neighbor", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SAdd(ctx, "qbit:registry:{queues}:names", target, neighbor).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := purgeQueueData(ctx, address, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed keys = %d, want 1", removed)
+	}
+	if exists := client.Exists(ctx, targetKey).Val(); exists != 0 {
+		t.Fatal("target queue key still exists")
+	}
+	if exists := client.Exists(ctx, neighborKey).Val(); exists != 1 {
+		t.Fatal("neighbor queue key was removed")
+	}
+	if registered := client.SIsMember(ctx, "qbit:registry:{queues}:names", target).Val(); registered {
+		t.Fatal("target queue is still registered")
+	}
+	if registered := client.SIsMember(ctx, "qbit:registry:{queues}:names", neighbor).Val(); !registered {
+		t.Fatal("neighbor queue registration was removed")
+	}
+}
 
 func TestDefaultConfigIsValid(t *testing.T) {
 	config := defaultConfig("127.0.0.1:6379")

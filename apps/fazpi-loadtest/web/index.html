@@ -128,8 +128,10 @@
         <div class="form-actions">
           <button id="start" type="submit" class="primary">Iniciar escenario</button>
           <button id="stop" type="button" class="danger" disabled>Detener</button>
+          <button id="cleanup" type="button" class="danger" disabled>Limpiar datos</button>
         </div>
         <p id="form-error" class="form-error" hidden></p>
+        <p id="form-message" class="form-message" hidden></p>
       </form>
     </aside>
 
@@ -147,11 +149,16 @@
         </div>
       </div>
 
+      <aside id="run-error" class="run-error" role="alert" hidden>
+        <strong>Error original</strong>
+        <code id="run-error-text"></code>
+      </aside>
+
       <section class="metric-grid">
         <article class="metric"><span>Publicados</span><strong id="m-published">0</strong><small id="m-published-sub">de 0</small></article>
         <article class="metric"><span>Terminales</span><strong id="m-terminal">0</strong><small id="m-terminal-sub">completados + permanentes</small></article>
         <article class="metric accent"><span>Esperando</span><strong id="m-waiting">0</strong><small>backlog actual</small></article>
-        <article class="metric"><span>Activos</span><strong id="m-active">0</strong><small id="m-active-sub">0 slots informados</small></article>
+        <article id="active-metric" class="metric"><span>Activos</span><strong id="m-active">0</strong><small id="m-active-sub">0 slots informados · 0 vencidos</small></article>
         <article class="metric"><span>Publicación</span><strong id="m-pub-rate">0/s</strong><small>ventana de 10 segundos</small></article>
         <article class="metric"><span>Completado</span><strong id="m-complete-rate">0/s</strong><small>ventana de 10 segundos</small></article>
         <article class="metric"><span>Espera promedio</span><strong id="m-wait">0 ms</strong><small>antes de reservar</small></article>
@@ -174,8 +181,8 @@
 
       <section class="charts-grid">
         <article class="panel chart-panel">
-          <div class="panel-title"><div><span class="eyebrow">PRESIÓN</span><h3>Backlog y jobs activos</h3></div><div class="legend"><span class="waiting"></span>Esperando <span class="active"></span>Activos</div></div>
-          <svg id="pressure-chart" viewBox="0 0 720 210" role="img" aria-label="Backlog y jobs activos"></svg>
+          <div class="panel-title"><div><span class="eyebrow">PRESIÓN</span><h3>Backlog y reservas</h3></div><div class="legend"><span class="waiting"></span>Esperando <span class="active"></span>Activos <span class="expired"></span>Vencidos</div></div>
+          <svg id="pressure-chart" viewBox="0 0 720 210" role="img" aria-label="Backlog, jobs activos y reservas vencidas"></svg>
         </article>
         <article class="panel chart-panel">
           <div class="panel-title"><div><span class="eyebrow">THROUGHPUT</span><h3>Publicación y completado</h3></div><div class="legend"><span class="published"></span>Publicados/s <span class="completed"></span>Completados/s</div></div>

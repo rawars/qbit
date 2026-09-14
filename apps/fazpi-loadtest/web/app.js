@@ -9,6 +9,7 @@ const numberFields = new Set([
 const decimalFields = new Set(['publish_rate','transient_failure_percent','permanent_failure_percent','duplicate_publish_percent']);
 let defaults = null;
 let state = null;
+let cleaning = false;
 
 const fazpiPeakPreset = [
   { account: 'Casur', agent: 'Kata en línea', people_per_hour: 100000, messages_per_person: 1 },
@@ -135,6 +136,31 @@ form.addEventListener('submit', async event => {
 $('stop').addEventListener('click', () => control('/api/stop'));
 $('pause').addEventListener('click', () => control('/api/pause'));
 $('resume').addEventListener('click', () => control('/api/resume'));
+$('cleanup').addEventListener('click', async () => {
+  const config = readForm();
+  const queue = config.queue?.trim();
+  const redisAddress = config.redis_address?.trim();
+  if (!queue || !redisAddress || cleaning) return;
+  if (!window.confirm(`Se eliminarán únicamente los datos Redis de la cola "${queue}" en ${redisAddress}. Esta acción no se puede deshacer. ¿Continuar?`)) return;
+  cleaning = true;
+  $('cleanup').disabled = true;
+  $('form-error').hidden = true;
+  $('form-message').hidden = true;
+  try {
+    const result = await api('/api/cleanup', { method: 'POST', body: JSON.stringify({ redis_address: redisAddress, queue }) });
+    $('form-message').textContent = `Cola ${result.queue} limpia: ${fmt(result.keys_unlinked)} claves enviadas a eliminación asíncrona.`;
+    $('form-message').hidden = false;
+    form.elements.queue.value = `fazpi-sim-${new Date().toTimeString().slice(0,8).replaceAll(':','')}`;
+    updatePreview();
+    await refresh();
+  } catch (error) {
+    $('form-error').textContent = error.message;
+    $('form-error').hidden = false;
+  } finally {
+    cleaning = false;
+    if (state) render(state);
+  }
+});
 
 async function control(path) {
   try { await api(path, { method: 'POST' }); await refresh(); }
@@ -156,9 +182,12 @@ function render(snapshot) {
   const accounts = new Set(profiles.map(profile => profile.account)).size;
   const conversations = profiles.reduce((total, profile) => total + Number(profile.expected_conversations || 0), 0);
   $('run-subtitle').textContent = snapshot.error || (snapshot.run_id ? `${fmt(accounts)} cuentas · ${fmt(profiles.length)} agentes · ${fmt(conversations)} conversaciones · ${fmt(expected)} mensajes` : 'Configura la simulación y presiona “Iniciar escenario”.');
+  $('run-error').hidden = !snapshot.error;
+  $('run-error-text').textContent = snapshot.error || '';
 
   $('start').disabled = active;
   $('stop').disabled = !active;
+  $('cleanup').disabled = active || cleaning;
   $('pause').disabled = !active || q.paused;
   $('resume').disabled = !active || !q.paused;
   [...form.elements].forEach(element => { if (element.name) element.disabled = active; });
@@ -169,7 +198,8 @@ function render(snapshot) {
   $('m-terminal-sub').textContent = `${fmt(c.completed)} completados · ${fmt(c.permanent_failures)} permanentes`;
   $('m-waiting').textContent = fmt(q.waiting);
   $('m-active').textContent = fmt(q.active);
-  $('m-active-sub').textContent = `${fmt(q.worker_concurrency)} slots informados`;
+  $('m-active-sub').textContent = `${fmt(q.worker_concurrency)} slots informados · ${fmt(q.expired_reservations)} vencidos`;
+  $('active-metric').className = `metric ${Number(q.expired_reservations || 0) > 0 ? 'warning' : ''}`;
   $('m-pub-rate').textContent = `${fmt(q.rates_per_second?.published)}/s`;
   $('m-complete-rate').textContent = `${fmt(q.rates_per_second?.completed)}/s`;
   $('m-wait').textContent = `${fmt(q.average_queue_wait_ms)} ms`;
@@ -214,7 +244,7 @@ function render(snapshot) {
   renderWorkers(q.workers || []);
   renderEvents(snapshot.events || []);
   renderChart($('pressure-chart'), snapshot.samples || [], [
-    { key: 'waiting', color: '#4aa3ff' }, { key: 'active', color: '#f2c94c' }
+    { key: 'waiting', color: '#4aa3ff' }, { key: 'active', color: '#f2c94c' }, { key: 'expired', color: '#ff6b7a' }
   ]);
   renderChart($('rate-chart'), snapshot.samples || [], [
     { key: 'published_rate', color: '#36d9c4' }, { key: 'completed_rate', color: '#55d98b' }

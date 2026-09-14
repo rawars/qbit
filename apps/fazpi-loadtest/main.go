@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	qbit "github.com/rawars/qbit/packages/go"
+	"github.com/redis/go-redis/v9"
 )
 
 //go:embed web/*
@@ -371,6 +373,7 @@ type Sample struct {
 	At            time.Time `json:"at"`
 	Waiting       int64     `json:"waiting"`
 	Active        int64     `json:"active"`
+	Expired       int64     `json:"expired"`
 	PublishedRate float64   `json:"published_rate"`
 	CompletedRate float64   `json:"completed_rate"`
 }
@@ -454,9 +457,20 @@ type simulation struct {
 }
 
 type application struct {
-	mu           sync.RWMutex
-	current      *simulation
-	defaultRedis string
+	mu                sync.RWMutex
+	current           *simulation
+	defaultRedis      string
+	cleanupInProgress bool
+}
+
+type cleanupRequest struct {
+	RedisAddress string `json:"redis_address"`
+	Queue        string `json:"queue"`
+}
+
+type cleanupResult struct {
+	Queue        string `json:"queue"`
+	KeysUnlinked int64  `json:"keys_unlinked"`
 }
 
 func newApplication(defaultRedis string) *application {
@@ -493,6 +507,9 @@ func newQueueClient(config Config, poolSize int) (*qbit.Client, *qbit.Queue, err
 
 func closeQbitClients(clients ...*qbit.Client) {
 	for _, client := range clients {
+		if client == nil {
+			continue
+		}
 		_ = client.Close()
 	}
 }
@@ -503,6 +520,9 @@ func (app *application) start(config Config) (*simulation, error) {
 	}
 	app.mu.Lock()
 	defer app.mu.Unlock()
+	if app.cleanupInProgress {
+		return nil, errors.New("Redis cleanup is still in progress")
+	}
 	if app.current != nil {
 		snapshot := app.current.snapshot()
 		if snapshot.Status == "starting" || snapshot.Status == "running" || snapshot.Status == "stopping" {
@@ -539,10 +559,10 @@ func (app *application) start(config Config) (*simulation, error) {
 		closeQbitClients(monitorClient, publisherClient)
 		return nil, err
 	}
-	if baselineStats.Waiting > 0 || baselineStats.Active > 0 {
+	if baselineStats.Waiting > 0 || baselineStats.Active > 0 || baselineStats.ExpiredReservations > 0 {
 		closeQbitClients(workerClients...)
 		closeQbitClients(monitorClient, publisherClient)
-		return nil, fmt.Errorf("queue %q is not empty: waiting=%d active=%d; use a new queue name", config.Queue, baselineStats.Waiting, baselineStats.Active)
+		return nil, fmt.Errorf("queue %q is not empty: waiting=%d active=%d expired=%d; use a new queue name or clean the previous run", config.Queue, baselineStats.Waiting, baselineStats.Active, baselineStats.ExpiredReservations)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -702,7 +722,10 @@ func (sim *simulation) publishAll() error {
 						case errChannel <- err:
 						default:
 						}
-						sim.cancel()
+						// Preserve the first Redis/Qbit error before cancellation. Calling
+						// cancel directly made the monitor classify this as a manual stop
+						// and hid the real publication failure from the dashboard.
+						sim.fail(err)
 						return
 					}
 				}
@@ -891,7 +914,7 @@ func (sim *simulation) monitor() {
 			stats := sim.stats
 			sim.stateMu.RUnlock()
 			terminal := counts.Completed + counts.PermanentFailures
-			if producerDone && terminal == sim.expectedUnique && stats.Waiting == 0 && stats.Active == 0 {
+			if producerDone && terminal == sim.expectedUnique && stats.Waiting == 0 && stats.Active == 0 && stats.ExpiredReservations == 0 {
 				sim.finalize("completed", "")
 				return
 			}
@@ -924,6 +947,7 @@ func (sim *simulation) refreshObservability() {
 			At:            time.Now().UTC(),
 			Waiting:       stats.Waiting,
 			Active:        stats.Active,
+			Expired:       stats.ExpiredReservations,
 			PublishedRate: stats.Rates.Published,
 			CompletedRate: stats.Rates.Completed,
 		})
@@ -1200,8 +1224,8 @@ func (sim *simulation) validations(status string, producerDone bool, counts Coun
 			fmt.Sprintf("%d errores de publicación", counts.PublishErrors)),
 		completionValidation("Todos los mensajes terminaron", counts.Completed+counts.PermanentFailures == sim.expectedUnique, finished,
 			fmt.Sprintf("%d de %d terminales", counts.Completed+counts.PermanentFailures, sim.expectedUnique)),
-		completionValidation("Cola drenada", stats.Waiting == 0 && stats.Active == 0, finished,
-			fmt.Sprintf("%d esperando y %d activos", stats.Waiting, stats.Active)),
+		completionValidation("Cola drenada", stats.Waiting == 0 && stats.Active == 0 && stats.ExpiredReservations == 0, finished,
+			fmt.Sprintf("%d esperando, %d activos y %d reservas vencidas", stats.Waiting, stats.Active, stats.ExpiredReservations)),
 		invariantValidation("SLA de espera por agente", slaPassed, finished, slaExplanation),
 		completionValidation("Publicación dentro de la ventana", publication.PublishedWithinTolerance, producerDone,
 			fmt.Sprintf("productor %.1f s; objetivo %.1f s + %.1f s de tolerancia; retraso máximo %.1f ms",
@@ -1340,6 +1364,139 @@ func decodeConfig(request *http.Request) (Config, error) {
 	return config, nil
 }
 
+func decodeCleanupRequest(request *http.Request) (cleanupRequest, error) {
+	defer request.Body.Close()
+	var value cleanupRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return cleanupRequest{}, err
+	}
+	value.Queue = strings.TrimSpace(value.Queue)
+	value.RedisAddress = strings.TrimSpace(value.RedisAddress)
+	if value.Queue == "" {
+		return cleanupRequest{}, errors.New("queue is required")
+	}
+	if value.RedisAddress == "" {
+		return cleanupRequest{}, errors.New("Redis address is required")
+	}
+	return value, nil
+}
+
+func isLoopbackRedisAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") || strings.EqualFold(host, "host.docker.internal") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// redisScanLiteral escapes Redis glob metacharacters so cleanup remains scoped
+// to the exact queue selected in the laboratory.
+func redisScanLiteral(value string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`?`, `\?`,
+		`[`, `\[`,
+		`]`, `\]`,
+	)
+	return replacer.Replace(value)
+}
+
+func purgeQueueData(ctx context.Context, redisAddress, queue string) (int64, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:         redisAddress,
+		PoolSize:     4,
+		DialTimeout:  3 * time.Second,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	})
+	defer client.Close()
+	if err := client.Ping(ctx).Err(); err != nil {
+		return 0, fmt.Errorf("connect to Redis for cleanup: %w", err)
+	}
+
+	pattern := "qbit:{" + redisScanLiteral(queue) + "}:*"
+	var unlinked int64
+	// SCAN can move across buckets while UNLINK removes keys. Repeat complete
+	// passes until one finds nothing, which is safe because terminal laboratory
+	// runs no longer have producers or workers writing to this queue.
+	for {
+		var cursor uint64
+		var passUnlinked int64
+		for {
+			keys, next, err := client.Scan(ctx, cursor, pattern, 1_000).Result()
+			if err != nil {
+				return unlinked, fmt.Errorf("scan queue %q: %w", queue, err)
+			}
+			if len(keys) > 0 {
+				removed, unlinkErr := client.Unlink(ctx, keys...).Result()
+				if unlinkErr != nil {
+					return unlinked, fmt.Errorf("unlink queue %q: %w", queue, unlinkErr)
+				}
+				passUnlinked += removed
+				unlinked += removed
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+		if passUnlinked == 0 {
+			break
+		}
+	}
+	if err := client.SRem(ctx, "qbit:registry:{queues}:names", queue).Err(); err != nil {
+		return unlinked, fmt.Errorf("remove queue %q from registry: %w", queue, err)
+	}
+	return unlinked, nil
+}
+
+func (app *application) cleanup(redisAddress, queue string) (cleanupResult, error) {
+	if !isLoopbackRedisAddress(redisAddress) {
+		return cleanupResult{}, errors.New("laboratory cleanup is restricted to a loopback Redis address")
+	}
+	app.mu.Lock()
+	if app.cleanupInProgress {
+		app.mu.Unlock()
+		return cleanupResult{}, errors.New("Redis cleanup is already in progress")
+	}
+	current := app.current
+	if current != nil {
+		snapshot := current.snapshot()
+		if snapshot.Status == "starting" || snapshot.Status == "running" || snapshot.Status == "stopping" {
+			app.mu.Unlock()
+			return cleanupResult{}, errors.New("stop the current scenario and wait for it to finish before cleaning Redis")
+		}
+	}
+	app.cleanupInProgress = true
+	app.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	keys, err := purgeQueueData(ctx, redisAddress, queue)
+
+	app.mu.Lock()
+	app.cleanupInProgress = false
+	if err == nil && app.current == current && current != nil {
+		snapshot := current.snapshot()
+		if snapshot.Config.RedisAddress == redisAddress && snapshot.Config.Queue == queue {
+			app.current = nil
+		}
+	}
+	app.mu.Unlock()
+	if err != nil {
+		return cleanupResult{}, err
+	}
+	return cleanupResult{Queue: queue, KeysUnlinked: keys}, nil
+}
+
 func (app *application) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/defaults", func(writer http.ResponseWriter, _ *http.Request) {
@@ -1369,6 +1526,19 @@ func (app *application) routes() http.Handler {
 		}
 		sim.stop()
 		writeJSON(writer, http.StatusAccepted, map[string]string{"status": "stopping"})
+	})
+	mux.HandleFunc("POST /api/cleanup", func(writer http.ResponseWriter, request *http.Request) {
+		value, err := decodeCleanupRequest(request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		result, err := app.cleanup(value.RedisAddress, value.Queue)
+		if err != nil {
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(writer, http.StatusOK, result)
 	})
 	for path, action := range map[string]func(*simulation) error{
 		"POST /api/pause":  (*simulation).pause,
