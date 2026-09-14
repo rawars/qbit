@@ -110,6 +110,7 @@ The exporter is also published as
 docs/protocol/       Redis protocol documentation
 docs/observability/  Prometheus and Grafana development stack
 apps/qbit-demo/      Load producer and worker demo application
+apps/fazpi-loadtest/ Fazpi-oriented load laboratory with a web dashboard
 packages/go/         Stable Go SDK import
 packages/go/qbit/    Go SDK implementation
 protocol/redis/      Canonical cross-SDK Redis scripts
@@ -119,6 +120,29 @@ cmd/qbit-metrics/     Installable exporter and production Docker image
 
 BullMQ is used as an architectural reference only. Qbit has its own keyspace,
 wire format and public API.
+
+## Fazpi load laboratory
+
+The local laboratory simulates simultaneous traffic from multiple Fazpi
+accounts and agents using the real Qbit Go SDK. Each agent has an independent
+people-per-hour rate and messages-per-person value while every conversation
+retains its own FIFO group. A configurable 12-window arrival curve creates
+peaks and valleys throughout the simulated hour. Its web dashboard configures
+time acceleration, publishers, worker replicas,
+concurrency, processing time, duplicate messages, failures, retry policy and a
+per-agent queue-wait SLA. It validates FIFO processing, per-thread mutual
+exclusion, idempotency, agent isolation and complete queue drainage.
+
+With Redis running on `127.0.0.1:6379`:
+
+```powershell
+$env:QBIT_REDIS_ADDR = "127.0.0.1:6379"
+go run ./apps/fazpi-loadtest
+```
+
+Open `http://127.0.0.1:8080`. See the
+[Fazpi load laboratory guide](apps/fazpi-loadtest/README.md) for the available
+checks and configuration.
 
 ## Quality gates
 

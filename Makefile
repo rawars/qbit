@@ -7,7 +7,7 @@ QBIT_METRICS_IMAGE ?= qbit-metrics:dev
 VERSION ?= dev
 COMMIT ?= working-tree
 
-.PHONY: test integration staticcheck govulncheck audit fuzz coverage benchmark chaos metrics qbitctl image-metrics observability demo-producer demo-worker
+.PHONY: test integration staticcheck govulncheck audit fuzz coverage benchmark chaos metrics qbitctl image-metrics observability demo-producer demo-worker fazpi-loadtest
 
 test:
 	go test -race ./...
@@ -59,3 +59,6 @@ demo-producer:
 
 demo-worker:
 	QBIT_REDIS_ADDR=$(REDIS_ADDR) QBIT_QUEUE=$(QBIT_QUEUE) go run ./apps/qbit-demo/worker
+
+fazpi-loadtest:
+	QBIT_REDIS_ADDR=$(REDIS_ADDR) go run ./apps/fazpi-loadtest
