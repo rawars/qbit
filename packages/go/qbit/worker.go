@@ -52,6 +52,12 @@ type WorkerOptions struct {
 	// context is cancelled. Handlers should observe their context.
 	ShutdownTimeout time.Duration
 
+	// RedisRetryBackoff controls retries for temporary Redis failures. Qbit
+	// keeps retrying recoverable connection, timeout, pool, and failover errors
+	// until the worker is cancelled. Nil uses jittered exponential backoff from
+	// 50ms to 2s. Permanent Redis errors still stop Run and are returned.
+	RedisRetryBackoff Backoff
+
 	// ID and Instance identify this replica in Prometheus/Grafana. Empty values
 	// are generated automatically.
 	ID              string
@@ -139,6 +145,12 @@ func NewWorker(queue *Queue, handler Handler, options WorkerOptions) (*Worker, e
 	if err != nil {
 		return nil, err
 	}
+	if normalized.ID == "" {
+		normalized.ID, err = randomToken()
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Worker{queue: queue, handler: handler, options: normalized}, nil
 }
 
@@ -185,6 +197,9 @@ func normalizeWorkerOptions(options WorkerOptions) (WorkerOptions, error) {
 	if options.ShutdownTimeout == 0 {
 		options.ShutdownTimeout = 30 * time.Second
 	}
+	if options.RedisRetryBackoff == nil {
+		options.RedisRetryBackoff = defaultRedisRetryBackoff()
+	}
 	if options.RegistrationTTL < 0 {
 		return options, errors.New("qbit: registration TTL cannot be negative")
 	}
@@ -218,7 +233,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.options.Instance != "" {
 		registrationOptions = append(registrationOptions, WithWorkerInstance(w.options.Instance))
 	}
-	registration, err := w.queue.RegisterWorker(runCtx, w.options.Concurrency, registrationOptions...)
+	registration, err := retryRedisValue(runCtx, w.options.RedisRetryBackoff, func(ctx context.Context) (*WorkerRegistration, error) {
+		return w.queue.RegisterWorker(ctx, w.options.Concurrency, registrationOptions...)
+	})
 	if err != nil {
 		if runCtx.Err() != nil {
 			return nil
@@ -246,7 +263,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
-		if maintainErr := registration.Maintain(lifecycleCtx); maintainErr != nil && lifecycleCtx.Err() == nil {
+		if maintainErr := w.maintainRegistration(lifecycleCtx, registration); maintainErr != nil && lifecycleCtx.Err() == nil {
 			reportFatal(fmt.Errorf("qbit: maintain worker registration: %w", maintainErr))
 		}
 	}()
@@ -330,11 +347,13 @@ func (w *Worker) finishRun() {
 
 func (w *Worker) runSlot(reserveCtx, processingCtx context.Context, reportFatal func(error)) {
 	for {
-		job, err := w.queue.ReserveBlocking(
-			reserveCtx,
-			w.options.ReserveWait,
-			WithLockTTL(w.options.LockTTL),
-		)
+		job, err := retryRedisValue(reserveCtx, w.options.RedisRetryBackoff, func(ctx context.Context) (*Job, error) {
+			return w.queue.ReserveBlocking(
+				ctx,
+				w.options.ReserveWait,
+				WithLockTTL(w.options.LockTTL),
+			)
+		})
 		if err != nil {
 			if reserveCtx.Err() != nil {
 				return
@@ -396,26 +415,76 @@ func (w *Worker) processJob(processingCtx context.Context, job *Job) error {
 		return fmt.Errorf("qbit: renew job %q: %w", job.ID, renewalErr)
 	}
 
+	// Finalization deliberately outlives the reservation context. Graceful
+	// shutdown stops new work but still grants an in-flight job up to five
+	// seconds to persist its terminal transition.
 	finishCtx, cancelFinish := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelFinish()
 	if handlerErr == nil {
-		if err := w.queue.Complete(finishCtx, job); err != nil {
-			return fmt.Errorf("qbit: complete job %q: %w", job.ID, err)
+		if err := retryRedisOperation(finishCtx, w.options.RedisRetryBackoff, func(ctx context.Context) error {
+			return w.queue.Complete(ctx, job)
+		}); err != nil {
+			return w.jobTransitionError("complete", job, err)
 		}
 		return nil
 	}
 
 	if IsPermanent(handlerErr) || job.Attempts >= w.options.Retry.MaxAttempts {
-		if err := w.queue.Fail(finishCtx, job, handlerErr); err != nil {
-			return fmt.Errorf("qbit: fail job %q: %w", job.ID, err)
+		if err := retryRedisOperation(finishCtx, w.options.RedisRetryBackoff, func(ctx context.Context) error {
+			return w.queue.Fail(ctx, job, handlerErr)
+		}); err != nil {
+			return w.jobTransitionError("fail", job, err)
 		}
 		return nil
 	}
 
-	if err := w.queue.Retry(finishCtx, job, handlerErr); err != nil {
-		return fmt.Errorf("qbit: retry job %q: %w", job.ID, err)
+	if err := retryRedisOperation(finishCtx, w.options.RedisRetryBackoff, func(ctx context.Context) error {
+		return w.queue.Retry(ctx, job, handlerErr)
+	}); err != nil {
+		return w.jobTransitionError("retry", job, err)
 	}
 	return nil
+}
+
+func (w *Worker) maintainRegistration(ctx context.Context, registration *WorkerRegistration) error {
+	current := registration
+	registrationOptions := []WorkerOption{
+		WithWorkerTTL(w.options.RegistrationTTL),
+		WithWorkerID(registration.Info().ID),
+		WithWorkerInstance(registration.Info().Instance),
+	}
+	for {
+		err := current.Maintain(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			return nil
+		}
+		if !isTransientRedisError(err) && !errors.Is(err, ErrWorkerRegistrationLost) {
+			return err
+		}
+
+		current, err = retryRedisValue(ctx, w.options.RedisRetryBackoff, func(ctx context.Context) (*WorkerRegistration, error) {
+			return w.queue.RegisterWorker(ctx, w.options.Concurrency, registrationOptions...)
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func (w *Worker) jobTransitionError(operation string, job *Job, err error) error {
+	if isTransientRedisError(err) || errors.Is(err, context.Canceled) {
+		// Redis did not confirm the transition before its bounded finalization
+		// window ended. Ownership can no longer be proven, so allow normal
+		// expiry recovery instead of terminating every slot in the replica.
+		return fmt.Errorf("qbit: %s job %q: %w: %w", operation, job.ID, ErrReservationLost, err)
+	}
+	return fmt.Errorf("qbit: %s job %q: %w", operation, job.ID, err)
 }
 
 func (w *Worker) renewReservation(
@@ -425,24 +494,62 @@ func (w *Worker) renewReservation(
 	stop <-chan struct{},
 	done chan<- error,
 ) {
-	ticker := time.NewTicker(w.options.RenewInterval)
-	defer ticker.Stop()
+	lastConfirmed := time.Now()
+	attempt := 0
+	delay := w.options.RenewInterval
 	for {
+		timer := time.NewTimer(delay)
 		select {
 		case <-stop:
+			timer.Stop()
 			done <- nil
 			return
 		case <-ctx.Done():
+			timer.Stop()
 			done <- nil
 			return
-		case <-ticker.C:
-			renewCtx, cancelRenew := context.WithTimeout(context.Background(), w.options.RenewInterval)
+		case <-timer.C:
+			ownershipRemaining := time.Until(lastConfirmed.Add(w.options.LockTTL))
+			if ownershipRemaining <= 0 {
+				cancel()
+				done <- fmt.Errorf("%w: Redis did not confirm renewal before the lock TTL", ErrReservationLost)
+				return
+			}
+			operationTimeout := min(w.options.RenewInterval, ownershipRemaining)
+			renewCtx, cancelRenew := context.WithTimeout(ctx, operationTimeout)
 			err := w.queue.Renew(renewCtx, job, w.options.LockTTL)
 			cancelRenew()
-			if err != nil {
+			if err == nil {
+				lastConfirmed = time.Now()
+				attempt = 0
+				delay = w.options.RenewInterval
+				continue
+			}
+			if ctx.Err() != nil {
+				done <- nil
+				return
+			}
+			if errors.Is(err, ErrReservationLost) {
 				cancel()
 				done <- err
 				return
+			}
+			if !isTransientRedisError(err) {
+				cancel()
+				done <- err
+				return
+			}
+
+			attempt++
+			remaining := time.Until(lastConfirmed.Add(w.options.LockTTL))
+			if remaining <= 0 {
+				cancel()
+				done <- fmt.Errorf("%w: Redis renewal failed before the lock TTL: %w", ErrReservationLost, err)
+				return
+			}
+			delay = normalizeRedisRetryDelay(w.options.RedisRetryBackoff(attempt))
+			if delay > remaining {
+				delay = remaining
 			}
 		}
 	}
