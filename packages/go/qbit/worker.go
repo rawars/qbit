@@ -346,7 +346,12 @@ func (w *Worker) runSlot(reserveCtx, processingCtx context.Context, reportFatal 
 			return
 		}
 
-		if err := w.processJob(processingCtx, job); err != nil {
+		if err := w.processJob(processingCtx, job); errors.Is(err, ErrReservationLost) {
+			// Reservation fencing did its job: this slot no longer owns the
+			// message. Leave the active job to its current owner or to expiry
+			// recovery, then keep this slot available for unrelated groups.
+			continue
+		} else if err != nil {
 			reportFatal(err)
 			return
 		}

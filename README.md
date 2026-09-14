@@ -109,6 +109,7 @@ The exporter is also published as
 ```text
 docs/protocol/       Redis protocol documentation
 docs/observability/  Prometheus and Grafana development stack
+docs/incidents/      Reproducible incidents and known limits
 apps/qbit-demo/      Load producer and worker demo application
 apps/fazpi-loadtest/ Fazpi-oriented load laboratory with a web dashboard
 packages/go/         Stable Go SDK import

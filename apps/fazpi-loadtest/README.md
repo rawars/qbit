@@ -77,3 +77,13 @@ algún agente, aunque sea pequeño, supera el tiempo de espera aceptable.
 Los fallos transitorios son determinísticos y sólo ocurren en el primer
 intento. Los fallos permanentes también son determinísticos y no se solapan con
 los transitorios.
+
+## Incidentes resueltos
+
+La prueba extrema de 503.500 mensajes permitió reproducir un resultado ambiguo
+al confirmar un job: Redis lo dejó completado, pero el worker recibió
+`reservation lost` y detuvo la ejecución con backlog pendiente. Qbit ahora
+confirma idempotentemente una transición terminal ya aplicada y una pérdida
+real de reserva no detiene todos los workers. El análisis, el fix y sus pruebas
+están en
+[`docs/incidents/2026-09-14-reservation-lost-under-load.md`](../../docs/incidents/2026-09-14-reservation-lost-under-load.md).

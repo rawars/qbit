@@ -366,7 +366,10 @@ func (queue *Queue) finish(ctx context.Context, job *Job, state, message string)
 	if err != nil {
 		return fmt.Errorf("qbit: finish job: %w", err)
 	}
-	if result != 1 {
+	// A result of 2 means this exact reservation already applied the same
+	// terminal transition. Treat it as success so callers can safely retry an
+	// ACK whose Redis response was delayed or lost.
+	if result != 1 && result != 2 {
 		return ErrReservationLost
 	}
 	return nil

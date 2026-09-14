@@ -339,6 +339,100 @@ func TestRetryRejectsLostReservation(t *testing.T) {
 	}
 }
 
+func TestTerminalAcknowledgementsAreIdempotent(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		terminalType string
+		finish       func(context.Context, *Queue, *Job) error
+		conflict     func(context.Context, *Queue, *Job) error
+	}{
+		{
+			name:         "complete",
+			terminalType: "completed",
+			finish: func(ctx context.Context, queue *Queue, job *Job) error {
+				return queue.Complete(ctx, job)
+			},
+			conflict: func(ctx context.Context, queue *Queue, job *Job) error {
+				return queue.Fail(ctx, job, errors.New("conflicting terminal state"))
+			},
+		},
+		{
+			name:         "fail",
+			terminalType: "failed",
+			finish: func(ctx context.Context, queue *Queue, job *Job) error {
+				return queue.Fail(ctx, job, errors.New("permanent"))
+			},
+			conflict: func(ctx context.Context, queue *Queue, job *Job) error {
+				return queue.Complete(ctx, job)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			queue, ctx := newIntegrationQueue(t)
+			if _, err := queue.Add(ctx, "work", nil); err != nil {
+				t.Fatal(err)
+			}
+			job, err := queue.Reserve(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.finish(ctx, queue, job); err != nil {
+				t.Fatalf("first acknowledgement: %v", err)
+			}
+			if err := test.finish(ctx, queue, job); err != nil {
+				t.Fatalf("replayed acknowledgement: %v", err)
+			}
+			if err := test.conflict(ctx, queue, job); !errors.Is(err, ErrReservationLost) {
+				t.Fatalf("conflicting terminal state error = %v, want ErrReservationLost", err)
+			}
+
+			stats, err := queue.Stats(ctx, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.name == "complete" && stats.Totals.Completed != 1 {
+				t.Fatalf("completed total = %d, want 1", stats.Totals.Completed)
+			}
+			if test.name == "fail" && stats.Totals.Failed != 1 {
+				t.Fatalf("failed total = %d, want 1", stats.Totals.Failed)
+			}
+			events, err := queue.RecentEvents(ctx, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminalEvents := 0
+			for _, event := range events {
+				if event.Type == test.terminalType {
+					terminalEvents++
+				}
+			}
+			if terminalEvents != 1 {
+				t.Fatalf("terminal event count = %d, want 1; events = %+v", terminalEvents, events)
+			}
+		})
+	}
+}
+
+func TestTerminalAcknowledgementRejectsAnotherToken(t *testing.T) {
+	queue, ctx := newIntegrationQueue(t)
+	if _, err := queue.Add(ctx, "work", nil); err != nil {
+		t.Fatal(err)
+	}
+	job, err := queue.Reserve(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Complete(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := *job
+	stale.Token = "another-reservation-token"
+	if err := queue.Complete(ctx, &stale); !errors.Is(err, ErrReservationLost) {
+		t.Fatalf("Complete with another token error = %v, want ErrReservationLost", err)
+	}
+}
+
 func TestReserveBlockingWakesForJob(t *testing.T) {
 	queue, ctx := newIntegrationQueue(t)
 	go func() {

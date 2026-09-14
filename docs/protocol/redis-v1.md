@@ -43,6 +43,9 @@ Cluster hash tag and is not part of queue state-transition scripts.
 5. All state transitions involving multiple keys execute in Lua.
 6. A paused queue accepts publications but creates no new reservations; active
    reservations may complete, fail, retry or renew normally.
+7. Repeating the same terminal transition with the same reservation token is
+   idempotent and does not duplicate terminal events or counters. A different
+   token remains rejected by reservation fencing.
 
 Before reserving new work, consumers reclaim expired entries from the active
 job index. The abandoned job is returned to the front of its group so FIFO is
@@ -53,6 +56,12 @@ deadline.
 to the front of its group. A later successful completion is counted as a
 recovery. `Fail` remains terminal and releases the group without requeueing the
 job.
+
+`Complete` and `Fail` persist the reservation token as `finished_token` in the
+retained job hash. If an ACK response is delayed or lost, repeating the same
+operation with that token confirms the existing terminal result instead of
+reporting a lost reservation. The replay does not release the group twice or
+increment metrics twice.
 
 `Pause` and `Resume` are idempotent administrative operations. Their state is
 stored in the queue hash slot and is therefore observed by every worker replica.
@@ -66,6 +75,11 @@ IDs use the reserved `auto-` prefix.
 Delivery is at least once: an expired reservation is recovered and may execute
 again. Consumers must therefore be idempotent. Completed job hashes expire
 after 24 hours and failed job hashes after 7 days by default.
+
+A managed worker treats a fenced `ErrReservationLost` as local to that job. The
+affected job remains owned by another reservation or becomes eligible for
+expiry recovery, while the worker's other slots continue consuming unrelated
+groups. Infrastructure and Redis command errors remain fatal to the worker.
 
 ## Canonical scripts
 

@@ -1,5 +1,12 @@
 local token = redis.call('GET', KEYS[1])
-if not token or token ~= ARGV[2] then return -1 end
+if not token or token ~= ARGV[2] then
+  local terminalState = redis.call('HGET', KEYS[2], 'state')
+  local terminalToken = redis.call('HGET', KEYS[2], 'finished_token')
+  if terminalState == ARGV[3] and terminalToken == ARGV[2] then
+    return 2
+  end
+  return -1
+end
 local group = redis.call('HGET', KEYS[2], 'group')
 if not group then return -2 end
 
@@ -11,7 +18,10 @@ end
 local startedAt = tonumber(redis.call('HGET', KEYS[2], 'started_at')) or tonumber(ARGV[4])
 local processingMs = math.max(0, tonumber(ARGV[4]) - startedAt)
 local retries = tonumber(redis.call('HGET', KEYS[2], 'retries')) or 0
-redis.call('HSET', KEYS[2], 'state', ARGV[3], 'finished_at', ARGV[4])
+redis.call('HSET', KEYS[2],
+  'state', ARGV[3],
+  'finished_at', ARGV[4],
+  'finished_token', ARGV[2])
 if ARGV[5] ~= '' then redis.call('HSET', KEYS[2], 'error', ARGV[5]) end
 redis.call('PEXPIRE', KEYS[2], ARGV[8])
 
