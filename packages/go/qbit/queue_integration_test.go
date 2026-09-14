@@ -164,6 +164,32 @@ func TestExpiredReservationIsRecovered(t *testing.T) {
 	}
 }
 
+func TestStatsSeparatesLiveAndExpiredReservations(t *testing.T) {
+	queue, ctx := newIntegrationQueue(t)
+	if _, err := queue.Add(ctx, "work", nil, WithGroup("expires")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Add(ctx, "work", nil, WithGroup("live")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Reserve(ctx, WithLockTTL(30*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Reserve(ctx, WithLockTTL(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	stats, err := queue.Stats(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Active != 1 || stats.ExpiredReservations != 1 || stats.Waiting != 0 {
+		t.Fatalf("reservation stats = active %d, expired %d, waiting %d; want 1, 1, 0",
+			stats.Active, stats.ExpiredReservations, stats.Waiting)
+	}
+}
+
 func TestRenewPreventsRecovery(t *testing.T) {
 	queue, ctx := newIntegrationQueue(t)
 	if _, err := queue.Add(ctx, "work", nil, WithGroup("tenant")); err != nil {
@@ -503,6 +529,63 @@ func TestQueueStatsAggregateLifecycle(t *testing.T) {
 	}
 	if len(events) != 6 || events[0].Type != "failed" {
 		t.Fatalf("recent events = %+v", events)
+	}
+}
+
+func TestStatsUsesAggregatesWhenEventStreamIsUnavailable(t *testing.T) {
+	queue, ctx := newIntegrationQueue(t)
+	if _, err := queue.Add(ctx, "work", nil, WithGroup("group")); err != nil {
+		t.Fatal(err)
+	}
+	job, err := queue.Reserve(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := queue.Complete(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.client.Del(ctx, queue.keys.events()).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := queue.Stats(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Rates.Published <= 0 || stats.Rates.Reserved <= 0 || stats.Rates.Completed <= 0 {
+		t.Fatalf("aggregate rates = %+v", stats.Rates)
+	}
+	if stats.AverageProcessingMillis <= 0 {
+		t.Fatalf("average processing = %v, want positive", stats.AverageProcessingMillis)
+	}
+}
+
+func TestStatsPreservesLegacyQueueTotalsWithoutScanningEvents(t *testing.T) {
+	queue, ctx := newIntegrationQueue(t)
+	now := time.Now()
+	if err := queue.client.HSet(ctx, queue.keys.metrics(),
+		"initialized_at", now.Add(-time.Hour).UnixMilli(),
+		"published", 3,
+	).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.client.ZAdd(ctx, queue.keys.activeJobs(),
+		redis.Z{Score: float64(now.Add(-time.Second).UnixMilli()), Member: "expired"},
+		redis.Z{Score: float64(now.Add(time.Minute).UnixMilli()), Member: "live"},
+	).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := queue.Stats(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Totals.Published != 3 || stats.Waiting != 1 || stats.Active != 1 || stats.ExpiredReservations != 1 {
+		t.Fatalf("legacy stats = %+v", stats)
+	}
+	if stats.Rates != (LifecycleRates{}) || !stats.WindowMayBeEventTruncated {
+		t.Fatalf("legacy rolling metrics = rates %+v, truncated %v", stats.Rates, stats.WindowMayBeEventTruncated)
 	}
 }
 

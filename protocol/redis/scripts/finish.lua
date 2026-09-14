@@ -34,10 +34,16 @@ redis.call('XADD', KEYS[7], 'MAXLEN', '~', ARGV[6], '*',
   'event', ARGV[3], 'job_id', ARGV[7], 'group', group,
   'processing_ms', processingMs)
 redis.call('HINCRBY', KEYS[9], ARGV[3], 1)
+redis.call('HINCRBY', KEYS[10], ARGV[3], 1)
+redis.call('HINCRBY', KEYS[10], 'processing_total_ms', processingMs)
+redis.call('HINCRBY', KEYS[10], 'processing_samples', 1)
 if ARGV[3] == 'completed' and retries > 0 then
   redis.call('XADD', KEYS[7], 'MAXLEN', '~', ARGV[6], '*',
     'event', 'recovered', 'job_id', ARGV[7], 'group', group)
   redis.call('HINCRBY', KEYS[9], 'recovered', 1)
+  redis.call('HINCRBY', KEYS[10], 'recovered', 1)
 end
+redis.call('PEXPIRE', KEYS[10], ARGV[9])
+redis.call('HSETNX', KEYS[9], 'aggregates_initialized_at', ARGV[4])
 redis.call('HSET', KEYS[9], 'updated_at', ARGV[4])
 return 1

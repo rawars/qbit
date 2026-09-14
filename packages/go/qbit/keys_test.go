@@ -13,6 +13,9 @@ func TestQueueKeysUseOneClusterSlot(t *testing.T) {
 	if got, want := keys.groupWait("tenant-42"), "qbit:{emails}:group:tenant-42:wait"; got != want {
 		t.Fatalf("group key = %q, want %q", got, want)
 	}
+	if got, want := keys.metricsBucket(12345), "qbit:{emails}:metrics:bucket:12345"; got != want {
+		t.Fatalf("metrics bucket key = %q, want %q", got, want)
+	}
 }
 
 func TestQueueNameValidation(t *testing.T) {
