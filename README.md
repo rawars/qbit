@@ -179,6 +179,12 @@ docker compose up -d
 make observability
 ```
 
+El Redis de este Compose está perfilado para transporte Qbit con AOF
+`everysec`, `noeviction`, snapshots RDB automáticos desactivados y límites de
+memoria configurables. Consulta la
+[guía de Redis dedicado](docs/redis-dedicated-transport.md) antes de trasladar
+estos valores a un entorno real.
+
 Grafana is available at `http://127.0.0.1:3000` and Prometheus at
 `http://127.0.0.1:9090`. The local Grafana credentials default to
 `admin` / `qbit`; override `GRAFANA_ADMIN_USER` and
