@@ -50,6 +50,12 @@ persona de ese agente para simular conversaciones de distinta intensidad. Una
 duración real menor genera más presión; 3.600 segundos reproduce la tasa real
 durante una hora completa.
 
+El laboratorio usa pools Redis separados: uno para los publicadores, uno por
+réplica simulada y uno para monitoreo. El formulario permite dimensionarlos y
+muestra conexiones en uso, esperas y timeouts. El pool de cada réplica debe ser
+como mínimo la concurrencia de esa réplica más dos conexiones; para 25 slots el
+valor inicial recomendado por este laboratorio es 35.
+
 Las personas no aparecen todas juntas. El laboratorio reparte sus llegadas en
 12 ventanas de cinco minutos según la curva seleccionada. **Hora de pagos**
 incluye un pico principal y valles; **Uniforme** mantiene la misma intensidad;
@@ -73,10 +79,29 @@ algún agente, aunque sea pequeño, supera el tiempo de espera aceptable.
 - Todos los mensajes únicos llegan a un estado terminal.
 - Backlog y jobs activos regresan a cero.
 - Espera máxima de cada agente dentro del SLA configurado.
+- Publicación completa dentro de la ventana real más una tolerancia de 1 %, con
+  mínimo de 2 segundos y máximo de 30 segundos.
 
 Los fallos transitorios son determinísticos y sólo ocurren en el primer
 intento. Los fallos permanentes también son determinísticos y no se solapan con
 los transitorios.
+
+## Corrección de pools Redis
+
+En una prueba de 2.050.000 mensajes durante una hora real, las diez réplicas
+simuladas compartían un solo cliente Redis. Sus 250 slots agotaron el pool de
+160 conexiones con reservas bloqueantes y dejaron al publicador avanzando a
+unos 25–27 msg/s, muy por debajo de los 569,4 msg/s planeados. La ejecución no
+perdió mensajes: continuó publicando después de la hora, pero dejó de ser una
+simulación válida de esa ventana. El código ahora separa los clientes y pools,
+muestra su uso y valida el retraso frente a la curva. La regresión con 10 × 25
+workers pasó; falta repetir la ejecución completa de una hora.
+
+El incidente, la evidencia, cómo trasladar el principio a la arquitectura real
+de Fazpi y la corrección implementada están documentados en
+[`docs/incidents/2026-09-14-shared-redis-pool-starves-publisher.md`](../../docs/incidents/2026-09-14-shared-redis-pool-starves-publisher.md).
+La guía de implementación está en
+[`docs/redis-connection-pools.md`](../../docs/redis-connection-pools.md).
 
 ## Incidentes resueltos
 

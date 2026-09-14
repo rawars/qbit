@@ -205,6 +205,9 @@ its automatic discovery.
 
 See [the Prometheus query guide](docs/observability/prometheus-queries.md) for
 queue state, throughput, latency, capacity, multi-queue and alert expressions.
+For applications with blocking workers, see the
+[Redis connection-pool guide](docs/redis-connection-pools.md) before choosing
+worker concurrency or scaling the number of processes.
 
 ## Load demo
 

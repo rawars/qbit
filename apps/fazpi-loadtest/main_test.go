@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	qbit "github.com/rawars/qbit/packages/go"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestDefaultConfigIsValid(t *testing.T) {
@@ -78,6 +82,54 @@ func TestConfigRejectsImpossibleRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsPoolsThatCanBeExhaustedByConcurrency(t *testing.T) {
+	config := defaultConfig("127.0.0.1:6379")
+	config.PublisherRedisPoolSize = config.PublisherConcurrency - 1
+	if err := config.validate(); err == nil || !strings.Contains(err.Error(), "publisher Redis pool") {
+		t.Fatalf("expected publisher pool validation error, got %v", err)
+	}
+
+	config = defaultConfig("127.0.0.1:6379")
+	config.WorkerRedisPoolSize = config.WorkerConcurrency + 1
+	if err := config.validate(); err == nil || !strings.Contains(err.Error(), "worker Redis pool") {
+		t.Fatalf("expected worker pool validation error, got %v", err)
+	}
+}
+
+func TestRedisPoolPlanAccountsForEveryIsolatedClient(t *testing.T) {
+	config := defaultConfig("127.0.0.1:6379")
+	config.WorkerReplicas = 10
+	plan := config.redisPoolPlan()
+	if plan.Publisher != 64 || plan.WorkerPerReplica != 35 || plan.WorkersTotal != 350 || plan.Monitor != 16 {
+		t.Fatalf("unexpected Redis pool plan: %#v", plan)
+	}
+	if plan.MaximumConnections != 430 {
+		t.Fatalf("maximum connections = %d, want 430", plan.MaximumConnections)
+	}
+}
+
+func TestPublicationTimingDetectsSchedulerLag(t *testing.T) {
+	now := time.Now()
+	sim := &simulation{
+		config:             Config{TestDurationSeconds: 60},
+		startedAt:          now.Add(-61 * time.Second),
+		producerFinishedAt: now,
+	}
+	sim.publishScheduleSamples.Store(2)
+	sim.publishScheduleDelayNanos.Store(int64(1500 * time.Millisecond))
+	sim.maximumPublishDelayNanos.Store(int64(1 * time.Second))
+	onTime := sim.publicationTiming(true)
+	if !onTime.PublishedWithinTolerance || onTime.ToleranceSeconds != 2 || onTime.AverageScheduleDelayMS != 750 {
+		t.Fatalf("unexpected on-time publication result: %#v", onTime)
+	}
+
+	sim.maximumPublishDelayNanos.Store(int64(3 * time.Second))
+	late := sim.publicationTiming(true)
+	if late.PublishedWithinTolerance {
+		t.Fatalf("late publication should fail: %#v", late)
+	}
+}
+
 func TestFailureSelectionIsDeterministicAndDisjoint(t *testing.T) {
 	for index := 0; index < 10_000; index++ {
 		id := "message-" + strings.Repeat("x", index%17) + string(rune(index))
@@ -141,4 +193,91 @@ func TestQueueWaitSLAFailsForSlowAgent(t *testing.T) {
 	if passed || !strings.Contains(explanation, "Pascual / Principal") {
 		t.Fatalf("expected SLA failure identifying the agent, got passed=%v explanation=%q", passed, explanation)
 	}
+}
+
+func TestApplicationIsolatesRedisPoolsUnderWorkerLoad(t *testing.T) {
+	address := os.Getenv("QBIT_REDIS_ADDR")
+	if address == "" {
+		t.Skip("set QBIT_REDIS_ADDR to run the Redis pool isolation test")
+	}
+	queueName := fmt.Sprintf("fazpi-pool-isolation-%d", time.Now().UnixNano())
+	redisClient := redis.NewClient(&redis.Options{Addr: address})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var cursor uint64
+		for {
+			keys, next, err := redisClient.Scan(ctx, cursor, "qbit:{"+queueName+"}:*", 1000).Result()
+			if err != nil {
+				break
+			}
+			if len(keys) > 0 {
+				_ = redisClient.Del(ctx, keys...).Err()
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+		_ = redisClient.SRem(ctx, "qbit:registry:{queues}:names", queueName).Err()
+		_ = redisClient.Close()
+	})
+
+	config := defaultConfig(address)
+	config.Queue = queueName
+	config.TrafficProfiles = []TrafficProfile{{Account: "Casur", Agent: "Kata", PeoplePerHour: 1_000, MessagesPerPerson: 1}}
+	config.TestDurationSeconds = 1
+	config.WorkerReplicas = 10
+	config.WorkerConcurrency = 25
+	config.WorkerRedisPoolSize = 35
+	config.ProcessingMillis = 0
+	config.ProcessingJitterMillis = 0
+	config.QueueWaitSLAms = 10_000
+	config.TransientFailurePercent = 0
+	config.PermanentFailurePercent = 0
+	config.DuplicatePublishPercent = 0
+
+	app := newApplication(address)
+	sim, err := app.start(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if snapshot := sim.snapshot(); snapshot.Status == "starting" || snapshot.Status == "running" || snapshot.Status == "stopping" {
+			sim.stop()
+			deadline := time.Now().Add(20 * time.Second)
+			for time.Now().Before(deadline) {
+				status := sim.snapshot().Status
+				if status != "starting" && status != "running" && status != "stopping" {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	})
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := sim.snapshot()
+		switch snapshot.Status {
+		case "completed":
+			if snapshot.Counters.PublishedUnique != 1_000 || snapshot.Counters.Completed != 1_000 {
+				t.Fatalf("unexpected terminal counters: %+v", snapshot.Counters)
+			}
+			if !snapshot.Publication.PublishedWithinTolerance {
+				t.Fatalf("publisher missed its isolated-pool window: %+v", snapshot.Publication)
+			}
+			if snapshot.RedisPools.Plan.MaximumConnections != 430 {
+				t.Fatalf("unexpected pool plan: %+v", snapshot.RedisPools.Plan)
+			}
+			if snapshot.RedisPools.Publisher.Timeouts != 0 {
+				t.Fatalf("publisher pool timed out: %+v", snapshot.RedisPools.Publisher)
+			}
+			return
+		case "failed":
+			t.Fatalf("simulation failed: %s", snapshot.Error)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	sim.stop()
+	t.Fatalf("simulation did not finish before the deadline: %+v", sim.snapshot())
 }

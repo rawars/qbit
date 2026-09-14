@@ -46,6 +46,20 @@ type Client struct {
 	closeErr  error
 }
 
+// RedisPoolStats is a point-in-time view of the connection pool owned by a
+// Client. WaitCount and WaitDuration are cumulative and make pool starvation
+// observable without exposing the underlying Redis client.
+type RedisPoolStats struct {
+	Hits             uint32
+	Misses           uint32
+	Timeouts         uint32
+	WaitCount        uint32
+	WaitDuration     time.Duration
+	TotalConnections uint32
+	IdleConnections  uint32
+	StaleConnections uint32
+}
+
 // NewClient creates a Qbit client. It does not perform network I/O; Redis is
 // contacted by the first queue operation.
 func NewClient(options ClientOptions) (*Client, error) {
@@ -96,6 +110,30 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("qbit: ping Redis: %w", err)
 	}
 	return nil
+}
+
+// PoolStats returns connection-pool counters for this client. A nil client
+// returns zero values. The configured PoolSize is intentionally not included
+// because it belongs to application configuration; these counters describe
+// actual pool use.
+func (c *Client) PoolStats() RedisPoolStats {
+	if c == nil || c.redis == nil {
+		return RedisPoolStats{}
+	}
+	stats := c.redis.PoolStats()
+	if stats == nil {
+		return RedisPoolStats{}
+	}
+	return RedisPoolStats{
+		Hits:             stats.Hits,
+		Misses:           stats.Misses,
+		Timeouts:         stats.Timeouts,
+		WaitCount:        stats.WaitCount,
+		WaitDuration:     time.Duration(stats.WaitDurationNs),
+		TotalConnections: stats.TotalConns,
+		IdleConnections:  stats.IdleConns,
+		StaleConnections: stats.StaleConns,
+	}
 }
 
 // QueueNames returns every queue registered by Qbit, sorted by name. Producers

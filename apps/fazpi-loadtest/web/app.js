@@ -1,7 +1,7 @@
 const form = document.querySelector('#config-form');
 const numberFields = new Set([
-  'virtual_duration_minutes','test_duration_seconds','publisher_concurrency','payload_bytes',
-  'worker_replicas','worker_concurrency','processing_millis','processing_jitter_millis',
+  'virtual_duration_minutes','test_duration_seconds','publisher_concurrency','publisher_redis_pool_size','payload_bytes',
+  'worker_replicas','worker_concurrency','worker_redis_pool_size','monitor_redis_pool_size','processing_millis','processing_jitter_millis',
   'queue_wait_sla_ms',
   'max_attempts','retry_initial_millis','retry_maximum_millis',
   'completed_retention_minutes','failed_retention_minutes'
@@ -113,6 +113,7 @@ function updatePreview() {
   $('people-preview').textContent = fmt(peoplePerHour);
   $('expected-preview').textContent = fmt(expected);
   $('slots-preview').textContent = fmt((c.worker_replicas || 0) * (c.worker_concurrency || 0));
+  $('pool-total-preview').textContent = fmt((c.publisher_redis_pool_size || 0) + (c.worker_replicas || 0) * (c.worker_redis_pool_size || 0) + (c.monitor_redis_pool_size || 0));
 }
 
 form.addEventListener('input', updatePreview);
@@ -182,6 +183,24 @@ function render(snapshot) {
   $('c-configured').textContent = `${fmt(capacity.configured_slots)} configurados`;
   $('c-margin').textContent = `${fmt(capacity.estimated_capacity_margin)}×`;
   $('capacity-verdict').className = `capacity-card verdict ${Number(capacity.estimated_capacity_margin || 0) >= 1 ? 'healthy' : 'risk'}`;
+
+  const pools = snapshot.redis_pools || {};
+  const publisherPool = pools.publisher || {};
+  const workerPools = pools.workers || {};
+  const monitorPool = pools.monitor || {};
+  const publication = snapshot.publication_timing || {};
+  $('p-publisher').textContent = `${fmt(publisherPool.in_use_connections)} / ${fmt(publisherPool.configured)}`;
+  $('p-publisher-sub').textContent = `${fmt(publisherPool.wait_count)} esperas · ${fmt(publisherPool.timeouts)} timeouts`;
+  $('p-workers').textContent = `${fmt(workerPools.in_use_connections)} / ${fmt(workerPools.configured)}`;
+  $('p-workers-sub').textContent = `${fmt(pools.plan?.worker_per_replica)} por réplica · ${fmt(workerPools.wait_count)} esperas`;
+  $('p-monitor').textContent = `${fmt(monitorPool.in_use_connections)} / ${fmt(monitorPool.configured)}`;
+  $('p-monitor-sub').textContent = `${fmt(monitorPool.wait_count)} esperas · ${fmt(monitorPool.timeouts)} timeouts`;
+  $('p-schedule-delay').textContent = `${fmt(publication.maximum_schedule_delay_ms)} ms`;
+  $('p-schedule-sub').textContent = `promedio ${fmt(publication.average_schedule_delay_ms)} ms · tolerancia ${fmt(Number(publication.tolerance_seconds || 0) * 1000)} ms`;
+  const scheduleHealthy = !snapshot.producer_done
+    ? Number(publication.maximum_schedule_delay_ms || 0) <= Number(publication.tolerance_seconds || 0) * 1000
+    : Boolean(publication.published_within_tolerance);
+  $('publication-verdict').className = `capacity-card verdict ${scheduleHealthy ? 'healthy' : 'risk'}`;
 
   $('t-reserved').textContent = fmt(totals.reserved);
   $('t-completed').textContent = fmt(totals.completed);

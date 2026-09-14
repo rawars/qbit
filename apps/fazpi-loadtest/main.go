@@ -36,9 +36,12 @@ type Config struct {
 	TestDurationSeconds      int              `json:"test_duration_seconds"`
 	PublishRate              float64          `json:"publish_rate"`
 	PublisherConcurrency     int              `json:"publisher_concurrency"`
+	PublisherRedisPoolSize   int              `json:"publisher_redis_pool_size"`
 	PayloadBytes             int              `json:"payload_bytes"`
 	WorkerReplicas           int              `json:"worker_replicas"`
 	WorkerConcurrency        int              `json:"worker_concurrency"`
+	WorkerRedisPoolSize      int              `json:"worker_redis_pool_size"`
+	MonitorRedisPoolSize     int              `json:"monitor_redis_pool_size"`
 	ProcessingMillis         int              `json:"processing_millis"`
 	ProcessingJitterMillis   int              `json:"processing_jitter_millis"`
 	QueueWaitSLAms           int              `json:"queue_wait_sla_ms"`
@@ -75,9 +78,12 @@ func defaultConfig(redisAddress string) Config {
 		TestDurationSeconds:      60,
 		PublishRate:              0,
 		PublisherConcurrency:     8,
+		PublisherRedisPoolSize:   64,
 		PayloadBytes:             512,
 		WorkerReplicas:           4,
 		WorkerConcurrency:        25,
+		WorkerRedisPoolSize:      35,
+		MonitorRedisPoolSize:     16,
 		ProcessingMillis:         50,
 		ProcessingJitterMillis:   25,
 		QueueWaitSLAms:           2_000,
@@ -142,6 +148,9 @@ func (config Config) validate() error {
 	if config.PublisherConcurrency <= 0 || config.PublisherConcurrency > 10_000 {
 		return errors.New("publisher concurrency must be between 1 and 10000")
 	}
+	if config.PublisherRedisPoolSize < config.PublisherConcurrency || config.PublisherRedisPoolSize > 1_000_000 {
+		return errors.New("publisher Redis pool size must be at least publisher concurrency and at most 1000000")
+	}
 	if config.PayloadBytes < 0 || config.PayloadBytes > 1<<20 {
 		return errors.New("payload bytes must be between 0 and 1048576")
 	}
@@ -150,6 +159,15 @@ func (config Config) validate() error {
 	}
 	if config.WorkerConcurrency <= 0 || config.WorkerConcurrency > 10_000 {
 		return errors.New("worker concurrency must be between 1 and 10000")
+	}
+	if config.WorkerRedisPoolSize < config.WorkerConcurrency+2 || config.WorkerRedisPoolSize > 1_000_000 {
+		return errors.New("worker Redis pool size per replica must be at least worker concurrency plus 2 and at most 1000000")
+	}
+	if config.MonitorRedisPoolSize < 2 || config.MonitorRedisPoolSize > 1_000_000 {
+		return errors.New("monitor Redis pool size must be between 2 and 1000000")
+	}
+	if int64(config.PublisherRedisPoolSize)+int64(config.WorkerReplicas)*int64(config.WorkerRedisPoolSize)+int64(config.MonitorRedisPoolSize) > 10_000_000 {
+		return errors.New("combined Redis pool capacity must not exceed 10000000 connections")
 	}
 	if config.ProcessingMillis < 0 || config.ProcessingJitterMillis < 0 {
 		return errors.New("processing durations cannot be negative")
@@ -194,6 +212,18 @@ func (config Config) expectedUnique() int64 {
 		messages += config.conversationsFor(profile) * int64(profile.MessagesPerPerson)
 	}
 	return messages
+}
+
+func (config Config) redisPoolPlan() RedisPoolPlan {
+	workersTotal := config.WorkerReplicas * config.WorkerRedisPoolSize
+	return RedisPoolPlan{
+		Publisher:          config.PublisherRedisPoolSize,
+		WorkerPerReplica:   config.WorkerRedisPoolSize,
+		WorkerReplicas:     config.WorkerReplicas,
+		WorkersTotal:       workersTotal,
+		Monitor:            config.MonitorRedisPoolSize,
+		MaximumConnections: config.PublisherRedisPoolSize + workersTotal + config.MonitorRedisPoolSize,
+	}
 }
 
 type simulatedMessage struct {
@@ -276,6 +306,43 @@ type CapacityPlan struct {
 	EstimatedCapacityMargin float64 `json:"estimated_capacity_margin"`
 }
 
+type RedisPoolPlan struct {
+	Publisher          int `json:"publisher"`
+	WorkerPerReplica   int `json:"worker_per_replica"`
+	WorkerReplicas     int `json:"worker_replicas"`
+	WorkersTotal       int `json:"workers_total"`
+	Monitor            int `json:"monitor"`
+	MaximumConnections int `json:"maximum_connections"`
+}
+
+type RedisPoolUsage struct {
+	Configured       int     `json:"configured"`
+	TotalConnections uint64  `json:"total_connections"`
+	IdleConnections  uint64  `json:"idle_connections"`
+	InUseConnections uint64  `json:"in_use_connections"`
+	Hits             uint64  `json:"hits"`
+	Misses           uint64  `json:"misses"`
+	WaitCount        uint64  `json:"wait_count"`
+	WaitDurationMS   float64 `json:"wait_duration_ms"`
+	Timeouts         uint64  `json:"timeouts"`
+}
+
+type RedisPoolsSnapshot struct {
+	Plan      RedisPoolPlan  `json:"plan"`
+	Publisher RedisPoolUsage `json:"publisher"`
+	Workers   RedisPoolUsage `json:"workers"`
+	Monitor   RedisPoolUsage `json:"monitor"`
+}
+
+type PublicationTiming struct {
+	TargetDurationSeconds    float64 `json:"target_duration_seconds"`
+	ToleranceSeconds         float64 `json:"tolerance_seconds"`
+	ProducerElapsedSeconds   float64 `json:"producer_elapsed_seconds"`
+	AverageScheduleDelayMS   float64 `json:"average_schedule_delay_ms"`
+	MaximumScheduleDelayMS   float64 `json:"maximum_schedule_delay_ms"`
+	PublishedWithinTolerance bool    `json:"published_within_tolerance"`
+}
+
 func storeMaximum(target *atomic.Int64, value int64) {
 	for current := target.Load(); value > current; current = target.Load() {
 		if target.CompareAndSwap(current, value) {
@@ -333,6 +400,8 @@ type Snapshot struct {
 	Counters       CounterSnapshot      `json:"counters"`
 	Profiles       []ProfileSnapshot    `json:"profiles"`
 	Capacity       CapacityPlan         `json:"capacity"`
+	RedisPools     RedisPoolsSnapshot   `json:"redis_pools"`
+	Publication    PublicationTiming    `json:"publication_timing"`
 	QueueStats     qbit.Stats           `json:"queue_stats"`
 	QueueTotals    qbit.LifecycleCounts `json:"queue_totals_for_run"`
 	Samples        []Sample             `json:"samples"`
@@ -342,15 +411,19 @@ type Snapshot struct {
 }
 
 type simulation struct {
-	config         Config
-	runID          string
-	expectedUnique int64
-	client         *qbit.Client
-	queue          *qbit.Queue
-	baseline       qbit.LifecycleCounts
-	ctx            context.Context
-	cancel         context.CancelFunc
-	startedAt      time.Time
+	config          Config
+	runID           string
+	expectedUnique  int64
+	publisherClient *qbit.Client
+	publisherQueue  *qbit.Queue
+	monitorClient   *qbit.Client
+	monitorQueue    *qbit.Queue
+	workerClients   []*qbit.Client
+	workerQueues    []*qbit.Queue
+	baseline        qbit.LifecycleCounts
+	ctx             context.Context
+	cancel          context.CancelFunc
+	startedAt       time.Time
 
 	counts        counters
 	profileCounts []profileCounters
@@ -359,20 +432,25 @@ type simulation struct {
 	activeGroups map[string]int
 	lastSequence map[string]int
 
-	stateMu       sync.RWMutex
-	status        string
-	errorMessage  string
-	finishedAt    time.Time
-	producerDone  bool
-	stopRequested bool
-	stats         qbit.Stats
-	samples       []Sample
-	logs          []LogEntry
-	events        []qbit.Event
+	stateMu            sync.RWMutex
+	status             string
+	errorMessage       string
+	finishedAt         time.Time
+	producerFinishedAt time.Time
+	producerDone       bool
+	stopRequested      bool
+	stats              qbit.Stats
+	samples            []Sample
+	logs               []LogEntry
+	events             []qbit.Event
 
 	producerWG sync.WaitGroup
 	workerWG   sync.WaitGroup
 	finishOnce sync.Once
+
+	publishScheduleDelayNanos atomic.Int64
+	publishScheduleSamples    atomic.Int64
+	maximumPublishDelayNanos  atomic.Int64
 }
 
 type application struct {
@@ -383,6 +461,40 @@ type application struct {
 
 func newApplication(defaultRedis string) *application {
 	return &application{defaultRedis: defaultRedis}
+}
+
+func newQueueClient(config Config, poolSize int) (*qbit.Client, *qbit.Queue, error) {
+	client, err := qbit.NewClient(qbit.ClientOptions{Redis: qbit.RedisOptions{
+		Address:  config.RedisAddress,
+		PoolSize: poolSize,
+	}})
+	if err != nil {
+		return nil, nil, err
+	}
+	pingContext, cancelPing := context.WithTimeout(context.Background(), 3*time.Second)
+	err = client.Ping(pingContext)
+	cancelPing()
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	queue, err := client.Queue(config.Queue,
+		qbit.WithRetention(
+			time.Duration(config.CompletedRetentionMinute)*time.Minute,
+			time.Duration(config.FailedRetentionMinute)*time.Minute,
+		),
+	)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	return client, queue, nil
+}
+
+func closeQbitClients(clients ...*qbit.Client) {
+	for _, client := range clients {
+		_ = client.Close()
+	}
 }
 
 func (app *application) start(config Config) (*simulation, error) {
@@ -398,56 +510,62 @@ func (app *application) start(config Config) (*simulation, error) {
 		}
 	}
 
-	client, err := qbit.NewClient(qbit.ClientOptions{Redis: qbit.RedisOptions{Address: config.RedisAddress}})
+	publisherClient, publisherQueue, err := newQueueClient(config, config.PublisherRedisPoolSize)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create publisher Redis client: %w", err)
 	}
-	pingContext, cancelPing := context.WithTimeout(context.Background(), 3*time.Second)
-	err = client.Ping(pingContext)
-	cancelPing()
+	monitorClient, monitorQueue, err := newQueueClient(config, config.MonitorRedisPoolSize)
 	if err != nil {
-		_ = client.Close()
-		return nil, err
+		closeQbitClients(publisherClient)
+		return nil, fmt.Errorf("create monitor Redis client: %w", err)
 	}
-	queue, err := client.Queue(config.Queue,
-		qbit.WithRetention(
-			time.Duration(config.CompletedRetentionMinute)*time.Minute,
-			time.Duration(config.FailedRetentionMinute)*time.Minute,
-		),
-	)
-	if err != nil {
-		_ = client.Close()
-		return nil, err
+	workerClients := make([]*qbit.Client, 0, config.WorkerReplicas)
+	workerQueues := make([]*qbit.Queue, 0, config.WorkerReplicas)
+	for replica := 0; replica < config.WorkerReplicas; replica++ {
+		workerClient, workerQueue, workerErr := newQueueClient(config, config.WorkerRedisPoolSize)
+		if workerErr != nil {
+			closeQbitClients(workerClients...)
+			closeQbitClients(monitorClient, publisherClient)
+			return nil, fmt.Errorf("create Redis client for worker replica %d: %w", replica+1, workerErr)
+		}
+		workerClients = append(workerClients, workerClient)
+		workerQueues = append(workerQueues, workerQueue)
 	}
 	statsContext, cancelStats := context.WithTimeout(context.Background(), 3*time.Second)
-	baselineStats, err := queue.Stats(statsContext, 10*time.Second)
+	baselineStats, err := monitorQueue.Stats(statsContext, 10*time.Second)
 	cancelStats()
 	if err != nil {
-		_ = client.Close()
+		closeQbitClients(workerClients...)
+		closeQbitClients(monitorClient, publisherClient)
 		return nil, err
 	}
 	if baselineStats.Waiting > 0 || baselineStats.Active > 0 {
-		_ = client.Close()
+		closeQbitClients(workerClients...)
+		closeQbitClients(monitorClient, publisherClient)
 		return nil, fmt.Errorf("queue %q is not empty: waiting=%d active=%d; use a new queue name", config.Queue, baselineStats.Waiting, baselineStats.Active)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runID := strconv.FormatInt(time.Now().UnixNano(), 36)
 	sim := &simulation{
-		config:         config,
-		runID:          runID,
-		expectedUnique: config.expectedUnique(),
-		client:         client,
-		queue:          queue,
-		baseline:       baselineStats.Totals,
-		ctx:            ctx,
-		cancel:         cancel,
-		startedAt:      time.Now(),
-		status:         "starting",
-		activeGroups:   make(map[string]int),
-		lastSequence:   make(map[string]int),
-		profileCounts:  make([]profileCounters, len(config.TrafficProfiles)),
-		stats:          baselineStats,
+		config:          config,
+		runID:           runID,
+		expectedUnique:  config.expectedUnique(),
+		publisherClient: publisherClient,
+		publisherQueue:  publisherQueue,
+		monitorClient:   monitorClient,
+		monitorQueue:    monitorQueue,
+		workerClients:   workerClients,
+		workerQueues:    workerQueues,
+		baseline:        baselineStats.Totals,
+		ctx:             ctx,
+		cancel:          cancel,
+		startedAt:       time.Now(),
+		status:          "starting",
+		activeGroups:    make(map[string]int),
+		lastSequence:    make(map[string]int),
+		profileCounts:   make([]profileCounters, len(config.TrafficProfiles)),
+		stats:           baselineStats,
 	}
 	app.current = sim
 	sim.addLog("info", fmt.Sprintf("Scenario %s created for queue %s", runID, config.Queue))
@@ -476,8 +594,9 @@ func (app *application) activeSimulation() (*simulation, error) {
 
 func (sim *simulation) launch() {
 	sim.setStatus("running")
+	workers := make([]*qbit.Worker, 0, sim.config.WorkerReplicas)
 	for replica := 0; replica < sim.config.WorkerReplicas; replica++ {
-		worker, err := qbit.NewWorker(sim.queue, sim.handleJob, qbit.WorkerOptions{
+		worker, err := qbit.NewWorker(sim.workerQueues[replica], sim.handleJob, qbit.WorkerOptions{
 			Concurrency: sim.config.WorkerConcurrency,
 			Retry: qbit.RetryPolicy{
 				MaxAttempts: sim.config.MaxAttempts,
@@ -492,9 +611,16 @@ func (sim *simulation) launch() {
 		})
 		if err != nil {
 			sim.fail(err)
+			sim.finalize("failed", err.Error())
 			return
 		}
-		sim.workerWG.Add(1)
+		workers = append(workers, worker)
+	}
+
+	sim.workerWG.Add(len(workers))
+	sim.producerWG.Add(1)
+	go sim.monitor()
+	for replica, worker := range workers {
 		go func(replicaNumber int) {
 			defer sim.workerWG.Done()
 			if runErr := worker.Run(sim.ctx); runErr != nil && sim.ctx.Err() == nil {
@@ -503,25 +629,27 @@ func (sim *simulation) launch() {
 		}(replica + 1)
 	}
 
-	sim.producerWG.Add(1)
 	go func() {
 		defer sim.producerWG.Done()
 		err := sim.publishAll()
 		sim.stateMu.Lock()
-		sim.producerDone = true
+		sim.producerDone = err == nil
+		sim.producerFinishedAt = time.Now()
 		sim.stateMu.Unlock()
-		if err != nil && sim.ctx.Err() == nil {
-			sim.fail(err)
+		if err != nil {
+			if sim.ctx.Err() == nil {
+				sim.fail(err)
+			}
 			return
 		}
 		sim.addLog("info", "Producer finished publishing the scenario")
 	}()
-	go sim.monitor()
 }
 
 type conversationTask struct {
 	profileIndex      int
 	conversationIndex int64
+	scheduledAt       time.Time
 }
 
 func (sim *simulation) publishAll() error {
@@ -544,7 +672,7 @@ func (sim *simulation) publishAll() error {
 					return
 				}
 				select {
-				case tasks <- conversationTask{profileIndex: index, conversationIndex: conversation + 1}:
+				case tasks <- conversationTask{profileIndex: index, conversationIndex: conversation + 1, scheduledAt: target}:
 				case <-sim.ctx.Done():
 					return
 				}
@@ -615,6 +743,14 @@ func arrivalFraction(index, count int64, weights []float64) float64 {
 }
 
 func (sim *simulation) publishMessage(task conversationTask, sequence int) error {
+	if !task.scheduledAt.IsZero() {
+		delay := time.Since(task.scheduledAt)
+		if delay > 0 {
+			sim.publishScheduleDelayNanos.Add(delay.Nanoseconds())
+			sim.publishScheduleSamples.Add(1)
+			storeMaximum(&sim.maximumPublishDelayNanos, delay.Nanoseconds())
+		}
+	}
 	profile := sim.config.TrafficProfiles[task.profileIndex]
 	group := fmt.Sprintf("profile-%05d-thread-%09d", task.profileIndex+1, task.conversationIndex)
 	jobID := fmt.Sprintf("run-%s-p%05d-t%09d-m%06d", sim.runID, task.profileIndex+1, task.conversationIndex, sequence)
@@ -633,7 +769,7 @@ func (sim *simulation) publishMessage(task conversationTask, sequence int) error
 		return err
 	}
 	sim.counts.PublishAttempts.Add(1)
-	job, err := sim.queue.Publish(sim.ctx, "process-message", payload, qbit.WithGroup(group), qbit.WithJobID(jobID))
+	job, err := sim.publisherQueue.Publish(sim.ctx, "process-message", payload, qbit.WithGroup(group), qbit.WithJobID(jobID))
 	if err != nil {
 		sim.counts.PublishErrors.Add(1)
 		return fmt.Errorf("publish %s: %w", jobID, err)
@@ -651,7 +787,7 @@ func (sim *simulation) publishMessage(task conversationTask, sequence int) error
 	if selected(jobID, sim.config.DuplicatePublishPercent, 0) {
 		sim.counts.DuplicateAttempts.Add(1)
 		sim.counts.PublishAttempts.Add(1)
-		duplicate, duplicateErr := sim.queue.Publish(sim.ctx, "process-message", payload, qbit.WithGroup(group), qbit.WithJobID(jobID))
+		duplicate, duplicateErr := sim.publisherQueue.Publish(sim.ctx, "process-message", payload, qbit.WithGroup(group), qbit.WithJobID(jobID))
 		if duplicateErr != nil {
 			sim.counts.PublishErrors.Add(1)
 			return fmt.Errorf("duplicate publish %s: %w", jobID, duplicateErr)
@@ -779,9 +915,9 @@ func (sim *simulation) monitor() {
 
 func (sim *simulation) refreshObservability() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	stats, err := sim.queue.Stats(ctx, 10*time.Second)
+	stats, err := sim.monitorQueue.Stats(ctx, 10*time.Second)
 	if err == nil {
-		events, eventsErr := sim.queue.RecentEvents(ctx, 30)
+		events, eventsErr := sim.monitorQueue.RecentEvents(ctx, 30)
 		sim.stateMu.Lock()
 		sim.stats = stats
 		sim.samples = append(sim.samples, Sample{
@@ -834,7 +970,8 @@ func (sim *simulation) finalize(status, message string) {
 		sim.producerWG.Wait()
 		sim.workerWG.Wait()
 		sim.refreshObservability()
-		_ = sim.client.Close()
+		closeQbitClients(sim.workerClients...)
+		closeQbitClients(sim.monitorClient, sim.publisherClient)
 		sim.stateMu.Lock()
 		sim.status = status
 		sim.errorMessage = message
@@ -847,7 +984,7 @@ func (sim *simulation) finalize(status, message string) {
 func (sim *simulation) pause() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := sim.queue.Pause(ctx); err != nil {
+	if err := sim.monitorQueue.Pause(ctx); err != nil {
 		return err
 	}
 	sim.addLog("info", "Queue paused")
@@ -857,7 +994,7 @@ func (sim *simulation) pause() error {
 func (sim *simulation) resume() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := sim.queue.Resume(ctx); err != nil {
+	if err := sim.monitorQueue.Resume(ctx); err != nil {
 		return err
 	}
 	sim.addLog("info", "Queue resumed")
@@ -908,6 +1045,8 @@ func (sim *simulation) snapshot() Snapshot {
 		Counters:       counts,
 		Profiles:       sim.profileSnapshots(),
 		Capacity:       sim.capacityPlan(),
+		RedisPools:     sim.redisPoolsSnapshot(),
+		Publication:    sim.publicationTiming(producerDone),
 		QueueStats:     stats,
 		QueueTotals:    subtractCounts(stats.Totals, sim.baseline),
 		Samples:        samples,
@@ -974,9 +1113,82 @@ func (sim *simulation) capacityPlan() CapacityPlan {
 	}
 }
 
+func redisPoolUsage(configured int, clients ...*qbit.Client) RedisPoolUsage {
+	usage := RedisPoolUsage{Configured: configured}
+	for _, client := range clients {
+		stats := client.PoolStats()
+		usage.TotalConnections += uint64(stats.TotalConnections)
+		usage.IdleConnections += uint64(stats.IdleConnections)
+		usage.Hits += uint64(stats.Hits)
+		usage.Misses += uint64(stats.Misses)
+		usage.WaitCount += uint64(stats.WaitCount)
+		usage.WaitDurationMS += float64(stats.WaitDuration) / float64(time.Millisecond)
+		usage.Timeouts += uint64(stats.Timeouts)
+	}
+	if usage.TotalConnections >= usage.IdleConnections {
+		usage.InUseConnections = usage.TotalConnections - usage.IdleConnections
+	}
+	return usage
+}
+
+func (sim *simulation) redisPoolsSnapshot() RedisPoolsSnapshot {
+	plan := sim.config.redisPoolPlan()
+	return RedisPoolsSnapshot{
+		Plan:      plan,
+		Publisher: redisPoolUsage(plan.Publisher, sim.publisherClient),
+		Workers:   redisPoolUsage(plan.WorkersTotal, sim.workerClients...),
+		Monitor:   redisPoolUsage(plan.Monitor, sim.monitorClient),
+	}
+}
+
+func publicationWindowTolerance(duration time.Duration) time.Duration {
+	tolerance := duration / 100
+	if tolerance < 2*time.Second {
+		return 2 * time.Second
+	}
+	if tolerance > 30*time.Second {
+		return 30 * time.Second
+	}
+	return tolerance
+}
+
+func (sim *simulation) publicationTiming(producerDone bool) PublicationTiming {
+	target := time.Duration(sim.config.TestDurationSeconds) * time.Second
+	tolerance := publicationWindowTolerance(target)
+	sim.stateMu.RLock()
+	finishedAt := sim.producerFinishedAt
+	sim.stateMu.RUnlock()
+	elapsed := time.Duration(0)
+	if !sim.startedAt.IsZero() {
+		end := time.Now()
+		if !finishedAt.IsZero() {
+			end = finishedAt
+		}
+		elapsed = end.Sub(sim.startedAt)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
+	samples := sim.publishScheduleSamples.Load()
+	averageDelay := float64(0)
+	if samples > 0 {
+		averageDelay = float64(sim.publishScheduleDelayNanos.Load()) / float64(samples) / float64(time.Millisecond)
+	}
+	maximumDelay := time.Duration(sim.maximumPublishDelayNanos.Load())
+	return PublicationTiming{
+		TargetDurationSeconds:    target.Seconds(),
+		ToleranceSeconds:         tolerance.Seconds(),
+		ProducerElapsedSeconds:   elapsed.Seconds(),
+		AverageScheduleDelayMS:   averageDelay,
+		MaximumScheduleDelayMS:   float64(maximumDelay) / float64(time.Millisecond),
+		PublishedWithinTolerance: producerDone && elapsed <= target+tolerance && maximumDelay <= tolerance,
+	}
+}
+
 func (sim *simulation) validations(status string, producerDone bool, counts CounterSnapshot, stats qbit.Stats) []Validation {
 	finished := status == "completed"
 	slaPassed, slaExplanation := sim.queueWaitSLA()
+	publication := sim.publicationTiming(producerDone)
 	result := []Validation{
 		invariantValidation("Orden FIFO por thread", counts.OrderingViolations == 0, finished,
 			fmt.Sprintf("%d violaciones detectadas", counts.OrderingViolations)),
@@ -991,6 +1203,9 @@ func (sim *simulation) validations(status string, producerDone bool, counts Coun
 		completionValidation("Cola drenada", stats.Waiting == 0 && stats.Active == 0, finished,
 			fmt.Sprintf("%d esperando y %d activos", stats.Waiting, stats.Active)),
 		invariantValidation("SLA de espera por agente", slaPassed, finished, slaExplanation),
+		completionValidation("Publicación dentro de la ventana", publication.PublishedWithinTolerance, producerDone,
+			fmt.Sprintf("productor %.1f s; objetivo %.1f s + %.1f s de tolerancia; retraso máximo %.1f ms",
+				publication.ProducerElapsedSeconds, publication.TargetDurationSeconds, publication.ToleranceSeconds, publication.MaximumScheduleDelayMS)),
 	}
 	if status == "failed" {
 		for index := range result {

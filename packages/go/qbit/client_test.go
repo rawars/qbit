@@ -47,6 +47,22 @@ func TestNilClientQueueAndClose(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("nil Client.Close: %v", err)
 	}
+	if stats := client.PoolStats(); stats != (RedisPoolStats{}) {
+		t.Fatalf("nil Client.PoolStats = %+v", stats)
+	}
+}
+
+func TestClientPoolStatsAreAvailableWithoutExposingRedisClient(t *testing.T) {
+	client, err := NewClient(ClientOptions{Redis: RedisOptions{Address: "localhost:6379", PoolSize: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	stats := client.PoolStats()
+	if stats.TotalConnections != 0 || stats.WaitCount != 0 || stats.Timeouts != 0 {
+		t.Fatalf("unused client pool stats = %+v", stats)
+	}
 }
 
 func TestQueueNameFromMetricsKey(t *testing.T) {

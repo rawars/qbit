@@ -77,9 +77,10 @@
           <div class="field-grid">
             <label>Límite mensajes / segundo <input name="publish_rate" type="number" min="0" step="100" required></label>
             <label>Concurrencia <input name="publisher_concurrency" type="number" min="1" required></label>
+            <label>Pool Redis productor <input name="publisher_redis_pool_size" type="number" min="1" required></label>
             <label>Duplicados (%) <input name="duplicate_publish_percent" type="number" min="0" max="100" step="0.1" required></label>
           </div>
-          <p class="hint">Déjalo en 0 para respetar solamente la distribución temporal de cada agente. Úsalo para limitar al productor.</p>
+          <p class="hint">Déjalo en 0 para respetar solamente la distribución temporal de cada agente. El pool debe ser al menos igual a la concurrencia del productor.</p>
         </fieldset>
 
         <fieldset>
@@ -87,11 +88,22 @@
           <div class="field-grid">
             <label>Réplicas <input name="worker_replicas" type="number" min="1" required></label>
             <label>Concurrencia / réplica <input name="worker_concurrency" type="number" min="1" required></label>
+            <label>Pool Redis / réplica <input name="worker_redis_pool_size" type="number" min="3" required></label>
             <label>Proceso base (ms) <input name="processing_millis" type="number" min="0" required></label>
             <label>Variación máx. (ms) <input name="processing_jitter_millis" type="number" min="0" required></label>
             <label>SLA espera máx. (ms) <input name="queue_wait_sla_ms" type="number" min="1" required></label>
           </div>
           <div class="calculation"><span>Slots totales</span><strong id="slots-preview">0</strong></div>
+          <p class="hint">Cada réplica tiene un cliente y un pool independientes. El pool debe superar la concurrencia por al menos 2 conexiones; deja más margen para picos.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Monitoreo Redis</legend>
+          <div class="field-grid">
+            <label>Pool Redis monitor <input name="monitor_redis_pool_size" type="number" min="2" required></label>
+          </div>
+          <div class="calculation"><span>Máximo combinado de conexiones</span><strong id="pool-total-preview">0</strong></div>
+          <p class="hint">Es la suma máxima de los pools aislados; no significa que Redis abra todas esas conexiones desde el inicio.</p>
         </fieldset>
 
         <fieldset>
@@ -151,6 +163,13 @@
         <article class="capacity-card"><span>Capacidad teórica workers</span><strong id="c-capacity">0 msg/s</strong><small>según slots y tiempo configurados</small></article>
         <article class="capacity-card"><span>Slots necesarios estimados</span><strong id="c-required">0</strong><small id="c-configured">0 configurados</small></article>
         <article id="capacity-verdict" class="capacity-card verdict"><span>Margen estimado</span><strong id="c-margin">0×</strong><small>estimación previa, confirma con backlog</small></article>
+      </section>
+
+      <section class="capacity-grid">
+        <article class="capacity-card"><span>Pool productor</span><strong id="p-publisher">0 / 0</strong><small id="p-publisher-sub">en uso / configuradas</small></article>
+        <article class="capacity-card"><span>Pools workers</span><strong id="p-workers">0 / 0</strong><small id="p-workers-sub">en uso / configuradas</small></article>
+        <article class="capacity-card"><span>Pool monitor</span><strong id="p-monitor">0 / 0</strong><small id="p-monitor-sub">en uso / configuradas</small></article>
+        <article id="publication-verdict" class="capacity-card verdict"><span>Retraso de publicación</span><strong id="p-schedule-delay">0 ms</strong><small id="p-schedule-sub">máximo frente a la curva</small></article>
       </section>
 
       <section class="charts-grid">
