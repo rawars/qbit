@@ -252,6 +252,20 @@ Redis: qbit.RedisOptions{
 }
 ```
 
+## Redis connection pools
+
+Set `RedisOptions.PoolSize` explicitly for production workloads. A blocking
+worker can hold one Redis connection per concurrency slot while it waits for
+work, so its client needs a pool larger than its configured concurrency. Keep
+producer and blocking-consumer clients separate when both responsibilities run
+in one process.
+
+`Client.PoolStats()` reports actual connections plus cumulative pool waits and
+timeouts. Use it to confirm that increasing worker concurrency does not starve
+publishing, acknowledgments or monitoring. See the
+[connection-pool sizing guide](../../docs/redis-connection-pools.md) for the
+calculation, example and rollout checklist.
+
 Cluster connectivity is supported by the client. Distributing one hot logical
 queue over several Redis primaries still requires Qbit's planned physical
 queue partitioning; Redis Cluster alone does not split one queue's hash-tagged

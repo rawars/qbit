@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fazpi · Qbit Load Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">Q</div>
+      <div>
+        <strong>Qbit Load Lab</strong>
+        <span>Simulador de tráfico Fazpi</span>
+      </div>
+    </div>
+    <div class="top-actions">
+      <a href="http://127.0.0.1:3001" target="_blank" rel="noreferrer">Abrir Grafana</a>
+      <a href="http://127.0.0.1:9090" target="_blank" rel="noreferrer">Abrir Prometheus</a>
+      <div id="connection" class="connection"><i></i> Conectando</div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="configuration">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">ESCENARIO</span>
+          <h1>Configurar carga</h1>
+        </div>
+        <button id="reset-config" class="icon-button" title="Restaurar valores">↻</button>
+      </div>
+
+      <form id="config-form">
+        <fieldset>
+          <legend>Conexión</legend>
+          <label>Redis <input name="redis_address" type="text" required></label>
+          <label>Nombre de cola <input name="queue" type="text" required></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Ventana de simulación</legend>
+          <div class="field-grid">
+            <label>Minutos virtuales <input name="virtual_duration_minutes" type="number" min="1" max="1440" required></label>
+            <label>Duración real (seg) <input name="test_duration_seconds" type="number" min="1" max="86400" required></label>
+            <label>Payload (bytes) <input name="payload_bytes" type="number" min="0" required></label>
+          </div>
+          <p class="hint">Ejemplo: 60 minutos virtuales en 60 segundos reproduce una hora de tráfico 60× más rápido.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Picos y valles de la hora</legend>
+          <div class="curve-presets">
+            <button type="button" data-curve="payment">Hora de pagos</button>
+            <button type="button" data-curve="uniform">Uniforme</button>
+            <button type="button" data-curve="double">Doble pico</button>
+          </div>
+          <p class="hint">Cada factor controla la intensidad de llegadas en una ventana de cinco minutos. Un valor alto genera un pico; uno bajo, un valle.</p>
+          <div id="curve-chart" class="curve-chart" aria-label="Distribución de tráfico durante la hora"></div>
+          <div id="arrival-weights" class="arrival-weights"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Cuentas y agentes</legend>
+          <div class="profile-actions">
+            <button id="fazpi-preset" type="button">Cargar hora pico Fazpi</button>
+            <button id="add-profile" type="button">+ Agente</button>
+          </div>
+          <div id="traffic-profiles" class="traffic-profiles"></div>
+          <div class="calculation"><span>Personas / hora</span><strong id="people-preview">0</strong></div>
+          <div class="calculation compact"><span>Mensajes únicos del test</span><strong id="expected-preview">0</strong></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Productores</legend>
+          <div class="field-grid">
+            <label>Límite mensajes / segundo <input name="publish_rate" type="number" min="0" step="100" required></label>
+            <label>Concurrencia <input name="publisher_concurrency" type="number" min="1" required></label>
+            <label>Pool Redis productor <input name="publisher_redis_pool_size" type="number" min="1" required></label>
+            <label>Duplicados (%) <input name="duplicate_publish_percent" type="number" min="0" max="100" step="0.1" required></label>
+          </div>
+          <p class="hint">Déjalo en 0 para respetar solamente la distribución temporal de cada agente. El pool debe ser al menos igual a la concurrencia del productor.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Workers</legend>
+          <div class="field-grid">
+            <label>Réplicas <input name="worker_replicas" type="number" min="1" required></label>
+            <label>Concurrencia / réplica <input name="worker_concurrency" type="number" min="1" required></label>
+            <label>Pool Redis / réplica <input name="worker_redis_pool_size" type="number" min="3" required></label>
+            <label>Proceso base (ms) <input name="processing_millis" type="number" min="0" required></label>
+            <label>Variación máx. (ms) <input name="processing_jitter_millis" type="number" min="0" required></label>
+            <label>SLA espera máx. (ms) <input name="queue_wait_sla_ms" type="number" min="1" required></label>
+          </div>
+          <div class="calculation"><span>Slots totales</span><strong id="slots-preview">0</strong></div>
+          <p class="hint">Cada réplica tiene un cliente y un pool independientes. El pool debe superar la concurrencia por al menos 2 conexiones; deja más margen para picos.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Monitoreo Redis</legend>
+          <div class="field-grid">
+            <label>Pool Redis monitor <input name="monitor_redis_pool_size" type="number" min="2" required></label>
+          </div>
+          <div class="calculation"><span>Máximo combinado de conexiones</span><strong id="pool-total-preview">0</strong></div>
+          <p class="hint">Es la suma máxima de los pools aislados; no significa que Redis abra todas esas conexiones desde el inicio.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Fallos y reintentos</legend>
+          <div class="field-grid">
+            <label>Transitorios (%) <input name="transient_failure_percent" type="number" min="0" max="100" step="0.1" required></label>
+            <label>Permanentes (%) <input name="permanent_failure_percent" type="number" min="0" max="100" step="0.1" required></label>
+            <label>Máx. intentos <input name="max_attempts" type="number" min="1" required></label>
+            <label>Backoff inicial (ms) <input name="retry_initial_millis" type="number" min="0" required></label>
+            <label>Backoff máximo (ms) <input name="retry_maximum_millis" type="number" min="0" required></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Retención</legend>
+          <div class="field-grid">
+            <label>Completados (min) <input name="completed_retention_minutes" type="number" min="1" required></label>
+            <label>Fallidos (min) <input name="failed_retention_minutes" type="number" min="1" required></label>
+          </div>
+        </fieldset>
+
+        <div class="form-actions">
+          <button id="start" type="submit" class="primary">Iniciar escenario</button>
+          <button id="stop" type="button" class="danger" disabled>Detener</button>
+          <button id="cleanup" type="button" class="danger" disabled>Limpiar datos</button>
+        </div>
+        <p id="form-error" class="form-error" hidden></p>
+        <p id="form-message" class="form-message" hidden></p>
+      </form>
+    </aside>
+
+    <section class="dashboard">
+      <div class="run-heading">
+        <div>
+          <span class="eyebrow">EJECUCIÓN ACTUAL</span>
+          <h2 id="run-title">Esperando un escenario</h2>
+          <p id="run-subtitle">Configura la simulación y presiona “Iniciar escenario”.</p>
+        </div>
+        <div class="run-controls">
+          <span id="status" class="status idle">IDLE</span>
+          <button id="pause" disabled>Pausar cola</button>
+          <button id="resume" disabled>Reanudar</button>
+        </div>
+      </div>
+
+      <aside id="run-error" class="run-error" role="alert" hidden>
+        <strong>Error original</strong>
+        <code id="run-error-text"></code>
+      </aside>
+
+      <section class="metric-grid">
+        <article class="metric"><span>Publicados</span><strong id="m-published">0</strong><small id="m-published-sub">de 0</small></article>
+        <article class="metric"><span>Terminales</span><strong id="m-terminal">0</strong><small id="m-terminal-sub">completados + permanentes</small></article>
+        <article class="metric accent"><span>Esperando</span><strong id="m-waiting">0</strong><small>backlog actual</small></article>
+        <article id="active-metric" class="metric"><span>Activos</span><strong id="m-active">0</strong><small id="m-active-sub">0 slots informados · 0 vencidos</small></article>
+        <article class="metric"><span>Publicación</span><strong id="m-pub-rate">0/s</strong><small>ventana de 10 segundos</small></article>
+        <article class="metric"><span>Completado</span><strong id="m-complete-rate">0/s</strong><small>ventana de 10 segundos</small></article>
+        <article class="metric"><span>Espera promedio</span><strong id="m-wait">0 ms</strong><small>antes de reservar</small></article>
+        <article class="metric"><span>Tiempo transcurrido</span><strong id="m-elapsed">0s</strong><small id="m-progress">0% procesado</small></article>
+      </section>
+
+      <section class="capacity-grid">
+        <article class="capacity-card"><span>Demanda del escenario</span><strong id="c-target">0 msg/s</strong><small>por la aceleración elegida</small></article>
+        <article class="capacity-card"><span>Capacidad teórica workers</span><strong id="c-capacity">0 msg/s</strong><small>según slots y tiempo configurados</small></article>
+        <article class="capacity-card"><span>Slots necesarios estimados</span><strong id="c-required">0</strong><small id="c-configured">0 configurados</small></article>
+        <article id="capacity-verdict" class="capacity-card verdict"><span>Margen estimado</span><strong id="c-margin">0×</strong><small>estimación previa, confirma con backlog</small></article>
+      </section>
+
+      <section class="capacity-grid">
+        <article class="capacity-card"><span>Pool productor</span><strong id="p-publisher">0 / 0</strong><small id="p-publisher-sub">en uso / configuradas</small></article>
+        <article class="capacity-card"><span>Pools workers</span><strong id="p-workers">0 / 0</strong><small id="p-workers-sub">en uso / configuradas</small></article>
+        <article class="capacity-card"><span>Pool monitor</span><strong id="p-monitor">0 / 0</strong><small id="p-monitor-sub">en uso / configuradas</small></article>
+        <article id="publication-verdict" class="capacity-card verdict"><span>Retraso de publicación</span><strong id="p-schedule-delay">0 ms</strong><small id="p-schedule-sub">máximo frente a la curva</small></article>
+      </section>
+
+      <section class="charts-grid">
+        <article class="panel chart-panel">
+          <div class="panel-title"><div><span class="eyebrow">PRESIÓN</span><h3>Backlog y reservas</h3></div><div class="legend"><span class="waiting"></span>Esperando <span class="active"></span>Activos <span class="expired"></span>Vencidos</div></div>
+          <svg id="pressure-chart" viewBox="0 0 720 210" role="img" aria-label="Backlog, jobs activos y reservas vencidas"></svg>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-title"><div><span class="eyebrow">THROUGHPUT</span><h3>Publicación y completado</h3></div><div class="legend"><span class="published"></span>Publicados/s <span class="completed"></span>Completados/s</div></div>
+          <svg id="rate-chart" viewBox="0 0 720 210" role="img" aria-label="Throughput"></svg>
+        </article>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel validation-panel">
+          <div class="panel-title"><div><span class="eyebrow">ASERCIONES</span><h3>Validaciones automáticas</h3></div></div>
+          <div id="validations" class="validations"><p class="empty">Las validaciones aparecerán al iniciar.</p></div>
+        </article>
+
+        <article class="panel totals-panel">
+          <div class="panel-title"><div><span class="eyebrow">REDIS / QBIT</span><h3>Transiciones de esta ejecución</h3></div></div>
+          <div class="totals">
+            <div><span>Reservados</span><strong id="t-reserved">0</strong></div>
+            <div><span>Completados</span><strong id="t-completed">0</strong></div>
+            <div><span>Fallos registrados</span><strong id="t-failed">0</strong></div>
+            <div><span>Reintentos</span><strong id="t-retried">0</strong></div>
+            <div><span>Recuperados</span><strong id="t-recovered">0</strong></div>
+            <div><span>Stalled</span><strong id="t-stalled">0</strong></div>
+          </div>
+        </article>
+      </section>
+
+
+      <section class="panel profile-results-panel">
+        <div class="panel-title">
+          <div><span class="eyebrow">FAZPI</span><h3>Resultado por cuenta y agente</h3></div>
+          <span class="table-note">Permite comprobar que los agentes pequeños avanzan mientras Kata recibe el pico.</span>
+        </div>
+        <div class="table-wrap profile-result-wrap"><table><thead><tr><th>Cuenta</th><th>Agente</th><th>Personas/h</th><th>Msg/persona</th><th>Mensajes</th><th>Terminales</th><th>Backlog</th><th>Pico backlog</th><th>Espera prom.</th><th>Espera máx.</th></tr></thead><tbody id="profile-results"><tr><td colspan="10" class="empty">Inicia un escenario para ver el desglose.</td></tr></tbody></table></div>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel">
+          <div class="panel-title"><div><span class="eyebrow">RÉPLICAS</span><h3>Workers vivos</h3></div><strong id="worker-summary">0 réplicas</strong></div>
+          <div class="table-wrap"><table><thead><tr><th>Instancia</th><th>Concurrencia</th><th>Heartbeat</th></tr></thead><tbody id="workers"><tr><td colspan="3" class="empty">Sin workers registrados</td></tr></tbody></table></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title"><div><span class="eyebrow">ACTIVIDAD</span><h3>Eventos recientes</h3></div></div>
+          <div id="events" class="event-list"><p class="empty">Sin eventos</p></div>
+        </article>
+      </section>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,11 +1,37 @@
 services:
   redis:
     image: redis:8-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+      - --maxmemory
+      - ${QBIT_REDIS_MAXMEMORY:-4gb}
+      - --maxmemory-policy
+      - noeviction
+      - --auto-aof-rewrite-percentage
+      - "200"
+      - --auto-aof-rewrite-min-size
+      - 256mb
+      - --lazyfree-lazy-user-del
+      - "yes"
+      - --lazyfree-lazy-expire
+      - "yes"
     ports:
-      - "6379:6379"
+      - "${QBIT_REDIS_BIND:-127.0.0.1}:${QBIT_REDIS_PORT:-6379}:6379"
     volumes:
       - qbit-redis:/data
+    mem_limit: ${QBIT_REDIS_CONTAINER_MEMORY:-5g}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
   qbit-redis:

@@ -212,3 +212,71 @@ func TestManagedWorkerRenewsLongRunningJob(t *testing.T) {
 		t.Fatalf("Run after cancellation: %v", runErr)
 	}
 }
+
+func TestManagedWorkerContinuesAfterReservationLoss(t *testing.T) {
+	queue, ctx := newIntegrationQueue(t)
+	if _, err := queue.Publish(ctx, "lose-reservation", nil, WithGroup("conversation-a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Publish(ctx, "must-continue", nil, WithGroup("conversation-b")); err != nil {
+		t.Fatal(err)
+	}
+
+	processedNext := make(chan struct{})
+	worker, err := NewWorker(queue, func(_ context.Context, job *Job) error {
+		if job.Name == "lose-reservation" {
+			if err := queue.client.Set(ctx, queue.keys.lock(job.ID), "another-owner", 5*time.Second).Err(); err != nil {
+				return Permanent(err)
+			}
+			return nil
+		}
+		close(processedNext)
+		return nil
+	}, WorkerOptions{
+		Concurrency:     1,
+		LockTTL:         500 * time.Millisecond,
+		RenewInterval:   100 * time.Millisecond,
+		ReserveWait:     20 * time.Millisecond,
+		ShutdownTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- worker.Run(workerCtx) }()
+
+	select {
+	case <-processedNext:
+	case runErr := <-runDone:
+		t.Fatalf("worker stopped after reservation loss: %v", runErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not continue to the unrelated group")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		stats, statsErr := queue.Stats(ctx, time.Minute)
+		if statsErr != nil {
+			t.Fatal(statsErr)
+		}
+		if stats.Totals.Completed == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second job was not acknowledged: %+v", stats)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case runErr := <-runDone:
+		if runErr != nil {
+			t.Fatalf("Run after cancellation: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop after cancellation")
+	}
+}

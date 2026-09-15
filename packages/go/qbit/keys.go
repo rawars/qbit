@@ -42,14 +42,17 @@ func validateIdentifier(kind, value string, maxLength int, separators string) er
 	return nil
 }
 
-func (keys queueKeys) id() string            { return keys.base + ":id" }
-func (keys queueKeys) events() string        { return keys.base + ":events" }
-func (keys queueKeys) ready() string         { return keys.base + ":groups:ready" }
-func (keys queueKeys) readySet() string      { return keys.base + ":groups:ready:set" }
-func (keys queueKeys) active() string        { return keys.base + ":groups:active" }
-func (keys queueKeys) activeJobs() string    { return keys.base + ":jobs:active" }
-func (keys queueKeys) marker() string        { return keys.base + ":marker" }
-func (keys queueKeys) metrics() string       { return keys.base + ":metrics" }
+func (keys queueKeys) id() string         { return keys.base + ":id" }
+func (keys queueKeys) events() string     { return keys.base + ":events" }
+func (keys queueKeys) ready() string      { return keys.base + ":groups:ready" }
+func (keys queueKeys) readySet() string   { return keys.base + ":groups:ready:set" }
+func (keys queueKeys) active() string     { return keys.base + ":groups:active" }
+func (keys queueKeys) activeJobs() string { return keys.base + ":jobs:active" }
+func (keys queueKeys) marker() string     { return keys.base + ":marker" }
+func (keys queueKeys) metrics() string    { return keys.base + ":metrics" }
+func (keys queueKeys) metricsBucket(startMilliseconds int64) string {
+	return fmt.Sprintf("%s:metrics:bucket:%d", keys.base, startMilliseconds)
+}
 func (keys queueKeys) paused() string        { return keys.base + ":paused" }
 func (keys queueKeys) workers() string       { return keys.base + ":workers" }
 func (keys queueKeys) job(id string) string  { return keys.base + ":job:" + id }

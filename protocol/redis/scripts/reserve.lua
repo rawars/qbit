@@ -1,5 +1,13 @@
 local base = ARGV[1]
 local now = tonumber(ARGV[4])
+local bucketTouched = false
+local function touchBucket()
+  if not bucketTouched then
+    redis.call('PEXPIRE', KEYS[9], ARGV[7])
+    redis.call('HSETNX', KEYS[7], 'aggregates_initialized_at', ARGV[4])
+    bucketTouched = true
+  end
+end
 if redis.call('EXISTS', KEYS[8]) == 1 then
   return {'__qbit_paused__'}
 end
@@ -24,6 +32,8 @@ for _, id in ipairs(expired) do
         'event', 'stalled', 'job_id', id, 'group', group)
       redis.call('HINCRBY', KEYS[7], 'stalled', 1)
       redis.call('HSET', KEYS[7], 'updated_at', ARGV[4])
+      redis.call('HINCRBY', KEYS[9], 'stalled', 1)
+      touchBucket()
     end
   else
     local ttl = redis.call('PTTL', lockKey)
@@ -53,6 +63,10 @@ for _ = 1, attempts do
         'event', 'active', 'job_id', id, 'group', group, 'wait_ms', waitMs)
       redis.call('HINCRBY', KEYS[7], 'reserved', 1)
       redis.call('HSET', KEYS[7], 'updated_at', ARGV[4])
+      redis.call('HINCRBY', KEYS[9], 'reserved', 1)
+      redis.call('HINCRBY', KEYS[9], 'queue_wait_total_ms', waitMs)
+      redis.call('HINCRBY', KEYS[9], 'queue_wait_samples', 1)
+      touchBucket()
       if redis.call('LLEN', KEYS[1]) > 0 then
         redis.call('ZADD', KEYS[6], 0, 'ready')
       else

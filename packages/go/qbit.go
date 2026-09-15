@@ -15,6 +15,7 @@ import (
 
 type (
 	RedisOptions       = core.RedisOptions
+	RedisPoolStats     = core.RedisPoolStats
 	ClientOptions      = core.ClientOptions
 	Client             = core.Client
 	Queue              = core.Queue

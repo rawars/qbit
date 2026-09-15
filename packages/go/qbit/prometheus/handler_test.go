@@ -35,11 +35,13 @@ func (reader fakeStatsReader) Stats(context.Context, time.Duration) (qbit.Stats,
 
 func TestHandlerExportsMetrics(t *testing.T) {
 	handler := Handler(fakeStatsReader{stats: qbit.Stats{
-		Queue:             `email"queue`,
-		Waiting:           3,
-		Paused:            true,
-		WorkerReplicas:    1,
-		WorkerConcurrency: 12,
+		Queue:               `email"queue`,
+		Waiting:             3,
+		Active:              4,
+		ExpiredReservations: 2,
+		Paused:              true,
+		WorkerReplicas:      1,
+		WorkerConcurrency:   12,
 		Workers: []qbit.WorkerInfo{{
 			ID: "worker-1", Instance: "pod-a", Concurrency: 12,
 			LastHeartbeatAt: time.Unix(100, 0),
@@ -56,6 +58,8 @@ func TestHandlerExportsMetrics(t *testing.T) {
 	metrics := string(body)
 	if !strings.Contains(metrics, `qbit_jobs_published_total{queue="email\"queue"} 10`) ||
 		!strings.Contains(metrics, `qbit_jobs_waiting{queue="email\"queue"} 3`) ||
+		!strings.Contains(metrics, `qbit_jobs_active{queue="email\"queue"} 4`) ||
+		!strings.Contains(metrics, `qbit_reservations_expired{queue="email\"queue"} 2`) ||
 		!strings.Contains(metrics, `qbit_jobs_retried_total{queue="email\"queue"} 2`) ||
 		!strings.Contains(metrics, `qbit_jobs_recovered_total{queue="email\"queue"} 2`) ||
 		!strings.Contains(metrics, `qbit_queue_paused{queue="email\"queue"} 1`) ||

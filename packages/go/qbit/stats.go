@@ -11,7 +11,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const maxRecentEvents = 10_000
+const (
+	maxRecentEvents        = 10_000
+	metricsAggregateWindow = 15 * time.Minute
+)
 
 // LifecycleCounts contains queue transitions observed since metrics were
 // initialized. Counters are shared by every client using the same queue.
@@ -46,6 +49,7 @@ type Stats struct {
 	Rates                     LifecycleRates  `json:"rates_per_second"`
 	Waiting                   int64           `json:"waiting"`
 	Active                    int64           `json:"active"`
+	ExpiredReservations       int64           `json:"expired_reservations"`
 	ReadyGroups               int64           `json:"ready_groups"`
 	Paused                    bool            `json:"paused"`
 	WorkerReplicas            int             `json:"worker_replicas"`
@@ -75,16 +79,21 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 		return Stats{}, errors.New("qbit: stats window must be positive")
 	}
 	now := time.Now()
+	bucketKeys, aggregateStart, aggregateTruncated := queue.metricsBuckets(now, window)
 	pipe := queue.client.Pipeline()
 	metricsCommand := pipe.HGetAll(ctx, queue.keys.metrics())
-	activeCommand := pipe.HLen(ctx, queue.keys.active())
+	activeCommand := pipe.ZCount(ctx, queue.keys.activeJobs(), strconv.FormatInt(now.UnixMilli()+1, 10), "+inf")
+	expiredCommand := pipe.ZCount(ctx, queue.keys.activeJobs(), "-inf", strconv.FormatInt(now.UnixMilli(), 10))
 	readyGroupsCommand := pipe.LLen(ctx, queue.keys.ready())
 	pausedCommand := pipe.Exists(ctx, queue.keys.paused())
 	pipe.ZRemRangeByScore(ctx, queue.keys.workers(), "-inf", strconv.FormatInt(now.UnixMilli(), 10))
 	workersCommand := pipe.ZRangeByScoreWithScores(ctx, queue.keys.workers(), &redis.ZRangeBy{
 		Min: strconv.FormatInt(now.UnixMilli()+1, 10), Max: "+inf",
 	})
-	eventsCommand := pipe.XRangeN(ctx, queue.keys.events(), streamID(now.Add(-window)), "+", maxRecentEvents)
+	bucketCommands := make([]*redis.MapStringStringCmd, 0, len(bucketKeys))
+	for _, key := range bucketKeys {
+		bucketCommands = append(bucketCommands, pipe.HGetAll(ctx, key))
+	}
 	oldestCommand := pipe.XRangeN(ctx, queue.keys.events(), "-", "+", 1)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return Stats{}, fmt.Errorf("qbit: read queue stats: %w", err)
@@ -98,6 +107,10 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	if err != nil {
 		return Stats{}, fmt.Errorf("qbit: read active jobs: %w", err)
 	}
+	expired, err := expiredCommand.Result()
+	if err != nil {
+		return Stats{}, fmt.Errorf("qbit: read expired reservations: %w", err)
+	}
 	readyGroups, err := readyGroupsCommand.Result()
 	if err != nil {
 		return Stats{}, fmt.Errorf("qbit: read ready groups: %w", err)
@@ -105,10 +118,6 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	paused, err := pausedCommand.Result()
 	if err != nil {
 		return Stats{}, fmt.Errorf("qbit: read queue pause state: %w", err)
-	}
-	events, err := eventsCommand.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return Stats{}, fmt.Errorf("qbit: read metric window: %w", err)
 	}
 	workerMembers, err := workersCommand.Result()
 	if err != nil {
@@ -118,7 +127,7 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	stats := Stats{
 		Queue:         queueName(queue.keys.base),
 		CapturedAt:    now.UTC(),
-		WindowSeconds: window.Seconds(),
+		WindowSeconds: now.Sub(aggregateStart).Seconds(),
 		Totals: LifecycleCounts{
 			Published: metricInt(metrics, "published"),
 			Reserved:  metricInt(metrics, "reserved"),
@@ -128,10 +137,11 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 			Retried:   metricInt(metrics, "retried"),
 			Recovered: metricInt(metrics, "recovered"),
 		},
-		Active:      active,
-		ReadyGroups: readyGroups,
-		Paused:      paused == 1,
-		Workers:     make([]WorkerInfo, 0, len(workerMembers)),
+		Active:              active,
+		ExpiredReservations: expired,
+		ReadyGroups:         readyGroups,
+		Paused:              paused == 1,
+		Workers:             make([]WorkerInfo, 0, len(workerMembers)),
 	}
 	if len(workerMembers) > 0 {
 		workerPipe := queue.client.Pipeline()
@@ -165,7 +175,10 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	// A retry records a failed attempt and creates another waiting attempt for
 	// the same logical job. Including it here keeps the backlog exact for both
 	// terminal failures and transient failures.
-	stats.Waiting = stats.Totals.Published + stats.Totals.Retried - stats.Totals.Completed - stats.Totals.Failed - active
+	// Expired reservations are still fenced from the ready ring until recovery
+	// runs. Keep them out of Waiting while exposing them separately from the
+	// reservations whose leases are genuinely live.
+	stats.Waiting = stats.Totals.Published + stats.Totals.Retried - stats.Totals.Completed - stats.Totals.Failed - active - expired
 	if stats.Waiting < 0 {
 		stats.Waiting = 0
 	}
@@ -173,32 +186,24 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	var waitTotal, processingTotal int64
 	var waitSamples, processingSamples int64
 	windowCounts := LifecycleCounts{}
-	for _, message := range events {
-		event := eventFromMessage(message)
-		switch event.Type {
-		case "waiting":
-			windowCounts.Published++
-		case "active":
-			windowCounts.Reserved++
-			waitTotal += event.QueueWaitMillis
-			waitSamples++
-		case "completed":
-			windowCounts.Completed++
-			processingTotal += event.ProcessingMillis
-			processingSamples++
-		case "failed":
-			windowCounts.Failed++
-			processingTotal += event.ProcessingMillis
-			processingSamples++
-		case "stalled":
-			windowCounts.Stalled++
-		case "retried":
-			windowCounts.Retried++
-		case "recovered":
-			windowCounts.Recovered++
+	for _, command := range bucketCommands {
+		bucket, bucketErr := command.Result()
+		if bucketErr != nil && !errors.Is(bucketErr, redis.Nil) {
+			return Stats{}, fmt.Errorf("qbit: read metric aggregate: %w", bucketErr)
 		}
+		windowCounts.Published += metricInt(bucket, "published")
+		windowCounts.Reserved += metricInt(bucket, "reserved")
+		windowCounts.Completed += metricInt(bucket, "completed")
+		windowCounts.Failed += metricInt(bucket, "failed")
+		windowCounts.Stalled += metricInt(bucket, "stalled")
+		windowCounts.Retried += metricInt(bucket, "retried")
+		windowCounts.Recovered += metricInt(bucket, "recovered")
+		waitTotal += metricInt(bucket, "queue_wait_total_ms")
+		waitSamples += metricInt(bucket, "queue_wait_samples")
+		processingTotal += metricInt(bucket, "processing_total_ms")
+		processingSamples += metricInt(bucket, "processing_samples")
 	}
-	stats.Rates = rates(windowCounts, window.Seconds())
+	stats.Rates = rates(windowCounts, stats.WindowSeconds)
 	if waitSamples > 0 {
 		stats.AverageQueueWaitMillis = float64(waitTotal) / float64(waitSamples)
 	}
@@ -207,9 +212,42 @@ func (queue *Queue) Stats(ctx context.Context, window time.Duration) (Stats, err
 	}
 	if oldest, oldestErr := oldestCommand.Result(); oldestErr == nil && len(oldest) == 1 {
 		stats.OldestEventAvailableAt = streamTime(oldest[0].ID)
-		stats.WindowMayBeEventTruncated = len(events) == maxRecentEvents && stats.OldestEventAvailableAt.After(now.Add(-window))
 	}
+	stats.WindowMayBeEventTruncated = aggregateTruncated || aggregateWindowStartsAfterRequested(metrics, now.Add(-window))
 	return stats, nil
+}
+
+// metricsBuckets returns a bounded set of small aggregate hashes. The first
+// bucket may begin up to one bucket width before the requested window; the
+// reported WindowSeconds reflects that actual sampled interval.
+func (queue *Queue) metricsBuckets(now time.Time, window time.Duration) ([]string, time.Time, bool) {
+	requestedStart := now.Add(-window)
+	oldestStart := now.Add(-metricsAggregateWindow)
+	truncated := requestedStart.Before(oldestStart)
+	if truncated {
+		requestedStart = oldestStart
+	}
+	start := requestedStart.Truncate(metricsBucketWidth)
+	end := now.Truncate(metricsBucketWidth)
+	keys := make([]string, 0, int(end.Sub(start)/metricsBucketWidth)+1)
+	for bucket := start; !bucket.After(end); bucket = bucket.Add(metricsBucketWidth) {
+		keys = append(keys, queue.keys.metricsBucket(bucket.UnixMilli()))
+	}
+	return keys, start, truncated
+}
+
+func aggregateWindowStartsAfterRequested(metrics map[string]string, requestedStart time.Time) bool {
+	initialized := metricInt(metrics, "initialized_at")
+	aggregatesInitialized := metricInt(metrics, "aggregates_initialized_at")
+	// Queues created by an older Qbit release have monotonic counters but no
+	// aggregate buckets. Preserve their totals and pressure gauges while making
+	// the unavailable rolling window explicit instead of scanning the legacy
+	// event stream during every scrape.
+	if initialized > 0 && aggregatesInitialized == 0 {
+		return true
+	}
+	return initialized > 0 && aggregatesInitialized > initialized &&
+		time.UnixMilli(aggregatesInitialized).After(requestedStart)
 }
 
 // RecentEvents returns newest queue events first.
@@ -251,8 +289,6 @@ func eventFromMessage(message redis.XMessage) Event {
 		ProcessingMillis: valueInt(message.Values["processing_ms"]),
 	}
 }
-
-func streamID(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) + "-0" }
 
 func streamTime(id string) time.Time {
 	milliseconds, _, _ := strings.Cut(id, "-")

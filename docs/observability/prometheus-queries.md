@@ -30,11 +30,21 @@ Trabajos esperando ser reservados:
 qbit_jobs_waiting{queue="whatsapp"}
 ```
 
-Trabajos reservados y actualmente en procesamiento:
+Trabajos con una reserva vigente y actualmente en procesamiento:
 
 ```promql
 qbit_jobs_active{queue="whatsapp"}
 ```
+
+Reservas cuyo lease ya venció y que esperan ser recuperadas:
+
+```promql
+qbit_reservations_expired{queue="whatsapp"}
+```
+
+Una reserva vencida no ocupa un slot real. Por ejemplo, `500` slots y `696`
+reservas vencidas se muestran como `0` activos y `696` vencidas cuando ya no
+hay workers ejecutándose, en vez de aparentar 696 trabajos simultáneos.
 
 Grupos que tienen trabajo disponible:
 
@@ -48,8 +58,9 @@ Estado de pausa administrativa (`1` pausada, `0` activa):
 qbit_queue_paused{queue="whatsapp"}
 ```
 
-`qbit_jobs_active` no cuenta procesos worker conectados. Si la cola está vacía,
-su valor será cero aunque los workers continúen ejecutándose y esperando.
+`qbit_jobs_active` no cuenta procesos worker conectados ni reservas vencidas.
+Si la cola está vacía, su valor será cero aunque los workers continúen
+ejecutándose y esperando.
 
 ## Workers registrados
 
@@ -154,6 +165,11 @@ qbit_queue_wait_seconds{queue="whatsapp"}
 
 La espera puede continuar aumentando mientras el backlog baja porque los
 workers están alcanzando trabajos cada vez más antiguos.
+
+Estas dos latencias se calculan con agregados pequeños de cinco segundos. El
+exportador no recorre el stream de eventos en cada scrape. Qbit conserva hasta
+15 minutos de agregados para su API operacional; Prometheus conserva el
+histórico de largo plazo y calcula las tasas de los contadores monotónicos.
 
 ## Diagnóstico de capacidad
 
@@ -283,6 +299,16 @@ Reservas vencidas durante los últimos cinco minutos:
 ```promql
 increase(qbit_jobs_stalled_total{queue="whatsapp"}[5m]) > 0
 ```
+
+Reservas vencidas que aún no han sido recuperadas:
+
+```promql
+qbit_reservations_expired{queue="whatsapp"} > 0
+```
+
+`qbit_jobs_stalled_total` aumenta cuando Qbit recupera la reserva;
+`qbit_reservations_expired` permite verla inmediatamente, antes de esa
+recuperación.
 
 Fallos sostenidos:
 

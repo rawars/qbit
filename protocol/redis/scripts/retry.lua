@@ -29,5 +29,11 @@ redis.call('XADD', KEYS[7], 'MAXLEN', '~', ARGV[5], '*',
   'event', 'retried', 'job_id', ARGV[6], 'group', group)
 redis.call('HINCRBY', KEYS[9], 'failed', 1)
 redis.call('HINCRBY', KEYS[9], 'retried', 1)
+redis.call('HINCRBY', KEYS[10], 'failed', 1)
+redis.call('HINCRBY', KEYS[10], 'retried', 1)
+redis.call('HINCRBY', KEYS[10], 'processing_total_ms', processingMs)
+redis.call('HINCRBY', KEYS[10], 'processing_samples', 1)
+redis.call('PEXPIRE', KEYS[10], ARGV[7])
+redis.call('HSETNX', KEYS[9], 'aggregates_initialized_at', ARGV[3])
 redis.call('HSET', KEYS[9], 'updated_at', ARGV[3])
 return 1

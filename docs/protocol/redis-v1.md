@@ -18,6 +18,7 @@ the same slot. For queue `emails`, the base key is `qbit:{emails}`.
 | `<base>:marker` | sorted set | Wakes consumers waiting for runnable work |
 | `<base>:events` | stream | Bounded lifecycle event log |
 | `<base>:metrics` | hash | Monotonic lifecycle counters for observability |
+| `<base>:metrics:bucket:<timestamp>` | hash | Five-second rate and latency aggregate; expires automatically |
 | `<base>:paused` | string | Distributed switch that prevents new reservations |
 | `<base>:workers` | sorted set | Worker IDs scored by heartbeat lease expiry |
 | `<base>:worker:<id>` | hash | Worker instance, concurrency and heartbeat data |
@@ -43,16 +44,26 @@ Cluster hash tag and is not part of queue state-transition scripts.
 5. All state transitions involving multiple keys execute in Lua.
 6. A paused queue accepts publications but creates no new reservations; active
    reservations may complete, fail, retry or renew normally.
+7. Repeating the same terminal transition with the same reservation token is
+   idempotent and does not duplicate terminal events or counters. A different
+   token remains rejected by reservation fencing.
 
 Before reserving new work, consumers reclaim expired entries from the active
 job index. The abandoned job is returned to the front of its group so FIFO is
 preserved. `Renew` atomically extends both the lock TTL and its active-index
-deadline.
+deadline. Operational statistics count only future deadlines as active and
+report past deadlines separately as expired reservations awaiting recovery.
 
 `Retry` records a failed processing attempt and atomically returns the same job
 to the front of its group. A later successful completion is counted as a
 recovery. `Fail` remains terminal and releases the group without requeueing the
 job.
+
+`Complete` and `Fail` persist the reservation token as `finished_token` in the
+retained job hash. If an ACK response is delayed or lost, repeating the same
+operation with that token confirms the existing terminal result instead of
+reporting a lost reservation. The replay does not release the group twice or
+increment metrics twice.
 
 `Pause` and `Resume` are idempotent administrative operations. Their state is
 stored in the queue hash slot and is therefore observed by every worker replica.
@@ -67,6 +78,14 @@ Delivery is at least once: an expired reservation is recovered and may execute
 again. Consumers must therefore be idempotent. Completed job hashes expire
 after 24 hours and failed job hashes after 7 days by default.
 
+A managed worker treats a fenced `ErrReservationLost` as local to that job. The
+affected job remains owned by another reservation or becomes eligible for
+expiry recovery, while the worker's other slots continue consuming unrelated
+groups. Recoverable Redis conditions such as network timeouts, pool pressure
+and failover states are retried with bounded backoff. Authentication,
+permission, OOM, invalid script/protocol and other non-transient errors remain
+fatal to the worker so configuration defects stay observable.
+
 ## Canonical scripts
 
 The Lua files in `protocol/redis/scripts` define the cross-language protocol.
@@ -75,11 +94,19 @@ SDKs embed these files instead of maintaining independent implementations.
 ## Observability
 
 The metrics hash stores monotonic `published`, `reserved`, `completed`,
-`failed`, `retried`, `recovered`, and `stalled` counters. Rates and latency are
-derived from the bounded event stream over a caller-selected time window. An `active` event
-includes `wait_ms`; terminal events include `processing_ms`. This makes one
-queue observable across every producer and worker replica without requiring
-the processes to communicate directly.
+`failed`, `retried`, `recovered`, and `stalled` counters. Each transition also
+updates a small five-second aggregate containing counts and latency sums. The
+aggregates expire automatically after 20 minutes and `Stats` reads at most the
+most recent 15 minutes. This bounds telemetry cost independently of queue
+throughput: a scrape no longer downloads or decodes up to 10,000 lifecycle
+events. `Stats` reads at most the oldest event as compatibility metadata; the
+event stream remains available for explicit diagnostic calls such as
+`RecentEvents` and is no longer scanned to calculate rates or latency.
+
+The requested statistics interval may be expanded backwards by less than five
+seconds to include a complete aggregate bucket. Windows longer than 15 minutes
+are truncated and set `window_may_be_event_truncated`; long-term rates should
+be calculated by Prometheus from the monotonic counters.
 
 Worker processes register a leased heartbeat. The registration disappears
 after its TTL when a process crashes or loses connectivity, allowing

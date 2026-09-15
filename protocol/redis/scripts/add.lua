@@ -25,5 +25,8 @@ redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[7], '*',
   'event', 'waiting', 'job_id', id, 'group', group)
 redis.call('HINCRBY', KEYS[7], 'published', 1)
 redis.call('HSETNX', KEYS[7], 'initialized_at', ARGV[6])
+redis.call('HSETNX', KEYS[7], 'aggregates_initialized_at', ARGV[6])
 redis.call('HSET', KEYS[7], 'updated_at', ARGV[6])
+redis.call('HINCRBY', KEYS[8], 'published', 1)
+redis.call('PEXPIRE', KEYS[8], ARGV[8])
 return {id, group, 0, ARGV[2], ARGV[5]}

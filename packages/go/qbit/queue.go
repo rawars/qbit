@@ -15,6 +15,11 @@ import (
 
 const maxEvents = 10_000
 
+const (
+	metricsBucketWidth = 5 * time.Second
+	metricsBucketTTL   = 20 * time.Minute
+)
+
 const recoverBatchSize = 100
 
 const (
@@ -106,9 +111,10 @@ func (queue *Queue) Add(ctx context.Context, name string, payload []byte, option
 		return nil, err
 	}
 
+	now := time.Now()
 	result, err := addScript.Run(ctx, queue.client,
-		[]string{queue.keys.id(), queue.keys.ready(), queue.keys.readySet(), queue.keys.active(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics()},
-		queue.keys.base, name, config.jobID, config.group, payload, time.Now().UnixMilli(), maxEvents,
+		[]string{queue.keys.id(), queue.keys.ready(), queue.keys.readySet(), queue.keys.active(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics(), queue.metricsBucket(now)},
+		queue.keys.base, name, config.jobID, config.group, payload, now.UnixMilli(), maxEvents, metricsBucketTTL.Milliseconds(),
 	).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("qbit: add job: %w", err)
@@ -146,9 +152,10 @@ func (queue *Queue) Reserve(ctx context.Context, options ...ReserveOption) (*Job
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
 	result, err := reserveScript.Run(ctx, queue.client,
-		[]string{queue.keys.ready(), queue.keys.readySet(), queue.keys.active(), queue.keys.events(), queue.keys.activeJobs(), queue.keys.marker(), queue.keys.metrics(), queue.keys.paused()},
-		queue.keys.base, token, config.lockTTL.Milliseconds(), time.Now().UnixMilli(), maxEvents, recoverBatchSize,
+		[]string{queue.keys.ready(), queue.keys.readySet(), queue.keys.active(), queue.keys.events(), queue.keys.activeJobs(), queue.keys.marker(), queue.keys.metrics(), queue.keys.paused(), queue.metricsBucket(now)},
+		queue.keys.base, token, config.lockTTL.Milliseconds(), now.UnixMilli(), maxEvents, recoverBatchSize, metricsBucketTTL.Milliseconds(),
 	).Slice()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrNoJob
@@ -338,9 +345,10 @@ func (queue *Queue) Retry(ctx context.Context, job *Job, cause error) error {
 	if cause != nil {
 		message = cause.Error()
 	}
+	now := time.Now()
 	result, err := retryScript.Run(ctx, queue.client,
-		[]string{queue.keys.lock(job.ID), queue.keys.job(job.ID), queue.keys.active(), queue.keys.activeJobs(), queue.keys.ready(), queue.keys.readySet(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics()},
-		queue.keys.base, job.Token, time.Now().UnixMilli(), message, maxEvents, job.ID,
+		[]string{queue.keys.lock(job.ID), queue.keys.job(job.ID), queue.keys.active(), queue.keys.activeJobs(), queue.keys.ready(), queue.keys.readySet(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics(), queue.metricsBucket(now)},
+		queue.keys.base, job.Token, now.UnixMilli(), message, maxEvents, job.ID, metricsBucketTTL.Milliseconds(),
 	).Int64()
 	if err != nil {
 		return fmt.Errorf("qbit: retry job: %w", err)
@@ -359,14 +367,18 @@ func (queue *Queue) finish(ctx context.Context, job *Job, state, message string)
 	if state == "failed" {
 		retention = queue.failedRetention
 	}
+	now := time.Now()
 	result, err := finishScript.Run(ctx, queue.client,
-		[]string{queue.keys.lock(job.ID), queue.keys.job(job.ID), queue.keys.active(), queue.keys.activeJobs(), queue.keys.ready(), queue.keys.readySet(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics()},
-		queue.keys.base, job.Token, state, time.Now().UnixMilli(), message, maxEvents, job.ID, retention.Milliseconds(),
+		[]string{queue.keys.lock(job.ID), queue.keys.job(job.ID), queue.keys.active(), queue.keys.activeJobs(), queue.keys.ready(), queue.keys.readySet(), queue.keys.events(), queue.keys.marker(), queue.keys.metrics(), queue.metricsBucket(now)},
+		queue.keys.base, job.Token, state, now.UnixMilli(), message, maxEvents, job.ID, retention.Milliseconds(), metricsBucketTTL.Milliseconds(),
 	).Int64()
 	if err != nil {
 		return fmt.Errorf("qbit: finish job: %w", err)
 	}
-	if result != 1 {
+	// A result of 2 means this exact reservation already applied the same
+	// terminal transition. Treat it as success so callers can safely retry an
+	// ACK whose Redis response was delayed or lost.
+	if result != 1 && result != 2 {
 		return ErrReservationLost
 	}
 	return nil
@@ -378,6 +390,11 @@ func randomToken() (string, error) {
 		return "", fmt.Errorf("qbit: create lock token: %w", err)
 	}
 	return hex.EncodeToString(buffer), nil
+}
+
+func (queue *Queue) metricsBucket(at time.Time) string {
+	start := at.Truncate(metricsBucketWidth).UnixMilli()
+	return queue.keys.metricsBucket(start)
 }
 
 func stringValue(value any) string {

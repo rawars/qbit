@@ -137,7 +137,8 @@
       "targets": [
         { "expr": "sum(qbit_jobs_active{queue=~\"$queue\"})", "legendFormat": "Active jobs", "refId": "A" },
         { "expr": "sum(qbit_ready_groups{queue=~\"$queue\"})", "legendFormat": "Ready groups", "refId": "B" },
-        { "expr": "sum(qbit_jobs_waiting{queue=~\"$queue\"})", "legendFormat": "Waiting jobs", "refId": "C" }
+        { "expr": "sum(qbit_jobs_waiting{queue=~\"$queue\"})", "legendFormat": "Waiting jobs", "refId": "C" },
+        { "expr": "sum(qbit_reservations_expired{queue=~\"$queue\"})", "legendFormat": "Expired reservations", "refId": "D" }
       ],
       "title": "Concurrency and groups",
       "type": "timeseries"
