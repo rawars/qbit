@@ -102,7 +102,7 @@ func defaultConfig(redisAddress string) Config {
 
 func (config Config) validate() error {
 	if strings.TrimSpace(config.RedisAddress) == "" {
-		return errors.New("Redis address is required")
+		return errors.New("redis address is required")
 	}
 	if strings.TrimSpace(config.Queue) == "" {
 		return errors.New("queue is required")
@@ -521,7 +521,7 @@ func (app *application) start(config Config) (*simulation, error) {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	if app.cleanupInProgress {
-		return nil, errors.New("Redis cleanup is still in progress")
+		return nil, errors.New("redis cleanup is still in progress")
 	}
 	if app.current != nil {
 		snapshot := app.current.snapshot()
@@ -1378,7 +1378,7 @@ func decodeCleanupRequest(request *http.Request) (cleanupRequest, error) {
 		return cleanupRequest{}, errors.New("queue is required")
 	}
 	if value.RedisAddress == "" {
-		return cleanupRequest{}, errors.New("Redis address is required")
+		return cleanupRequest{}, errors.New("redis address is required")
 	}
 	return value, nil
 }
@@ -1465,7 +1465,7 @@ func (app *application) cleanup(redisAddress, queue string) (cleanupResult, erro
 	app.mu.Lock()
 	if app.cleanupInProgress {
 		app.mu.Unlock()
-		return cleanupResult{}, errors.New("Redis cleanup is already in progress")
+		return cleanupResult{}, errors.New("redis cleanup is already in progress")
 	}
 	current := app.current
 	if current != nil {
